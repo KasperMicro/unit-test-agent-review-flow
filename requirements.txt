@@ -1,0 +1,17 @@
+# Microsoft Agent Framework
+agent-framework-core==1.0.0b260128
+
+# Azure Identity (pinned for cryptography compatibility on ARM64)
+azure-identity>=1.15.0,<1.20
+cryptography==46.0.3
+
+# Azure DevOps SDK
+azure-devops>=7.1.0b4
+msrest>=0.7.1
+
+# Git operations
+GitPython>=3.1.40
+
+# Environment and utilities
+python-dotenv>=1.0.0
+aiohttp>=3.9.0

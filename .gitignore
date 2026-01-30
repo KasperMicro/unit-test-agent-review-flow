@@ -1,0 +1,35 @@
+# Environment and secrets
+.env
+*.env.local
+
+# Virtual environments
+.venv/
+.venv-wsl/
+venv/
+env/
+
+# Cloned repositories (runtime workspace)
+cloned_code/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_devops.py
