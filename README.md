@@ -1,26 +1,27 @@
-# Agent Orchestration for Azure DevOps Logging Enhancement
+# Agent Orchestration for Azure DevOps Unit Test Generation
 
-This project provides a multi-agent orchestration system using Microsoft's **Semantic Kernel Agent Framework** to automatically add logging to code repositories hosted in Azure DevOps.
+This project provides a multi-agent orchestration system using Microsoft's **Semantic Kernel Agent Framework** to automatically generate comprehensive pytest unit tests for code repositories hosted in Azure DevOps.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     ORCHESTRATOR AGENT                          │
-│              (Coordinates the workflow)                         │
+│                   ORCHESTRATION WORKFLOW                         │
+│     (Clone → Verify → Plan → Implement → Review → PR)           │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
         ┌─────────────┼─────────────┬─────────────┐
         ▼             ▼             ▼             ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│  DevOps Agent │ │ Code Analyzer │ │ Logging Agent │
-│               │ │    Agent      │ │               │
-│ • Clone repo  │ │ • Analyze     │ │ • Read stds   │
-│ • Create PR   │ │   structure   │ │ • Add logging │
-│ • Push code   │ │ • Find gaps   │ │ • Write files │
-└───────────────┘ └───────────────┘ └───────────────┘
-        │                                   │
-        ▼                                   ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│   Verifier    │ │    Planner    │ │  Implementer  │ │   Reviewer    │
+│    Agent      │ │    Agent      │ │    Agent      │ │    Agent      │
+│               │ │               │ │               │ │               │
+│ • Check tests │ │ • Plan tests  │ │ • Write tests │ │ • Review code │
+│ • Run pytest  │ │ • Prioritize  │ │ • Use pytest  │ │ • Run pytest  │
+│ • Find gaps   │ │ • Identify    │ │ • Use mocking │ │ • Approve/fix │
+└───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘
+        │                                                   │
+        ▼                                                   ▼
 ┌───────────────────────────────────────────────────────────────┐
 │                    Azure DevOps REST API                       │
 │    • Git Repositories  • Pull Requests  • Branches            │
@@ -33,7 +34,7 @@ This project provides a multi-agent orchestration system using Microsoft's **Sem
 2. **Azure DevOps** account with:
    - Personal Access Token (PAT) with `Code (Read & Write)` scope
    - Access to target repository
-3. **Azure OpenAI** service (or OpenAI API)
+3. **Azure OpenAI** service (or managed identity authentication)
 4. **Git** installed locally
 
 ## Setup
@@ -60,15 +61,17 @@ AZURE_DEVOPS_ORG_URL=https://dev.azure.com/your-org
 AZURE_DEVOPS_PAT=your-personal-access-token
 AZURE_DEVOPS_PROJECT=your-project
 AZURE_DEVOPS_REPO_NAME=your-repo
+AZURE_DEVOPS_DEFAULT_BRANCH=main
 
-# Azure OpenAI
+# Azure OpenAI (managed identity - no API key required)
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_API_KEY=your-api-key
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
 
 # Workspace
-WORKSPACE_PATH=C:/AgentOrchestration/workspace
+WORKSPACE_PATH=./workspace
+
+# Optional: PR labels
+PR_LABELS=auto-generated,unit-tests
 ```
 
 ### 3. Create PAT in Azure DevOps
@@ -82,69 +85,78 @@ WORKSPACE_PATH=C:/AgentOrchestration/workspace
 
 ## Usage
 
-### Run Sequential Workflow (Recommended)
+### Run the Workflow
 
 ```bash
-python main.py --mode sequential --branch main --patterns "*.py"
+python main.py
 ```
 
-### Run Collaborative Agent Chat
+### With Custom Options
 
 ```bash
-python main.py --mode collaborative --branch develop --patterns "*.py" "*.cs"
+python main.py --branch develop --workspace ./my-workspace --labels "unit-tests" "auto-generated"
 ```
 
 ### Command Line Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--mode` | `sequential` or `collaborative` | `sequential` |
-| `--branch` | Target branch | `main` |
-| `--patterns` | File patterns to process | `*.py` |
-| `--workspace` | Local workspace path | From env |
+| `--branch` | Target branch to clone and PR against | `main` (or from env) |
+| `--workspace` | Local workspace path for cloned code | From env |
+| `--labels` | Labels to add to the PR | From env |
 
 ## Workflow Steps
 
-### Sequential Mode
-
 1. **Clone**: Downloads repository from Azure DevOps
-2. **Branch**: Creates a feature branch for changes
-3. **Analyze**: Code Analyzer identifies logging opportunities
-4. **Enhance**: Logging Agent adds logging statements
-5. **PR**: Creates pull request with all changes
+2. **Verify**: Verifier agent checks existing test coverage and runs pytest
+3. **Plan**: Planner agent creates a prioritized test plan
+4. **Implement**: Implementer agent writes pytest unit tests
+5. **Review**: Reviewer agent validates tests and runs pytest
+6. **PR**: Creates pull request with all changes
 
-### Collaborative Mode
+## Customizing Testing Standards
 
-Agents work together in a group chat, passing information and coordinating naturally.
+Edit `config/testing_standards.md` to define your organization's pytest requirements:
 
-## Customizing Logging Standards
-
-Edit `config/logging_standards.md` to define your organization's logging requirements:
-
-- Log levels and when to use them
-- Required logging points (function entry/exit, API calls, etc.)
-- Code examples for different languages
-- Structured logging format requirements
+- Test naming conventions
+- AAA pattern usage
+- Fixture guidelines
+- Mocking best practices
+- Coverage requirements
 
 ## Project Structure
 
 ```
 AgentOrchestration/
 ├── main.py                 # Entry point
-├── orchestration.py        # Orchestration logic
+├── orchestration.py        # Orchestration workflow
 ├── requirements.txt        # Dependencies
 ├── .env.example           # Environment template
 ├── agents/
 │   ├── __init__.py
-│   ├── agent_definitions.py  # Agent configurations
-│   └── plugins.py           # Agent tools/functions
+│   ├── agent_definitions.py  # Agent configurations (Verifier, Planner, Implementer, Reviewer)
+│   └── plugins.py           # Agent tools (file ops, pytest)
 ├── services/
 │   ├── __init__.py
-│   └── azure_devops_service.py  # DevOps API wrapper
+│   └── azure_devops_service.py  # DevOps API wrapper (clone, branch, PR)
 ├── config/
-│   └── logging_standards.md    # Logging documentation
+│   └── testing_standards.md    # Pytest best practices
 └── workspace/              # Cloned repos go here
 ```
+
+## Agents
+
+### Verifier Agent
+Analyzes the codebase to identify existing tests and coverage gaps. Runs pytest to understand current test status.
+
+### Planner Agent
+Creates a prioritized test plan based on code complexity, criticality, and missing coverage.
+
+### Implementer Agent
+Writes pytest unit tests following the testing standards. Uses fixtures, parametrize, and mocking appropriately.
+
+### Reviewer Agent
+Reviews implemented tests, runs pytest to verify they pass, and suggests improvements.
 
 ## Azure DevOps API Reference
 
@@ -179,13 +191,17 @@ Authorization: Basic base64(":PAT")
 - Check if PR already exists for the branch
 - Verify target branch exists
 
+### "Pytest not found"
+- Ensure pytest is installed in the target repository
+- The agents may add pytest to requirements.txt
+
 ## Extending the Solution
 
 ### Add New Agents
 
 1. Create agent definition in `agents/agent_definitions.py`
 2. Add plugins in `agents/plugins.py`
-3. Register in orchestration workflow
+3. Update `orchestration.py` workflow
 
 ### Custom Plugins
 

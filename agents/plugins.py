@@ -1,134 +1,49 @@
 """
-Agent Tools - Functions that agents can use as tools
+Agent Tools - Functions that agents can use for file operations and pytest.
+
+IMPORTANT: All file operations are restricted to the workspace path (cloned code)
+to prevent agents from modifying the orchestration code itself.
 """
 import os
+import subprocess
 from pathlib import Path
 from typing import Annotated
 from pydantic import Field
-import git
-
-from services.azure_devops_service import AzureDevOpsService, create_devops_service_from_env
 
 
-# Global service instance for tools
-_devops_service: AzureDevOpsService = None
+def _get_allowed_workspace() -> Path:
+    """Get the allowed workspace path from environment."""
+    workspace = os.getenv("WORKSPACE_PATH", "./cloned_code")
+    return Path(workspace).resolve()
 
 
-def _get_devops_service() -> AzureDevOpsService:
-    """Get or create DevOps service instance"""
-    global _devops_service
-    if _devops_service is None:
-        _devops_service = create_devops_service_from_env()
-    return _devops_service
-
-
-# DevOps Tools
-async def clone_repository(
-    target_path: Annotated[str, Field(description="Local path to clone the repository")],
-    branch: Annotated[str, Field(description="Branch name to clone")] = "main"
-) -> str:
-    """Clone the Azure DevOps repository to local workspace."""
+def _is_path_allowed(file_path: str) -> bool:
+    """Check if a path is within the allowed workspace."""
     try:
-        service = _get_devops_service()
-        repo_path = await service.clone_repository(target_path, branch)
-        return f"Successfully cloned repository to: {repo_path}"
-    except Exception as e:
-        return f"Error cloning repository: {str(e)}"
+        resolved = Path(file_path).resolve()
+        workspace = _get_allowed_workspace()
+        return str(resolved).startswith(str(workspace))
+    except Exception:
+        return False
 
 
-async def create_feature_branch(
-    branch_name: Annotated[str, Field(description="Name of the new branch")],
-    source_branch: Annotated[str, Field(description="Source branch to create from")] = "main"
-) -> str:
-    """Create a new feature branch for the logging changes."""
-    try:
-        service = _get_devops_service()
-        ref = await service.create_branch(branch_name, source_branch)
-        return f"Successfully created branch: {ref}"
-    except Exception as e:
-        return f"Error creating branch: {str(e)}"
+def _validate_path(file_path: str, operation: str) -> str | None:
+    """Validate a path and return error message if not allowed."""
+    if not _is_path_allowed(file_path):
+        workspace = _get_allowed_workspace()
+        return f"Error: {operation} is only allowed within the cloned code workspace: {workspace}. Path '{file_path}' is not allowed."
+    return None
 
 
-async def push_file_changes(
-    branch_name: Annotated[str, Field(description="Branch to push to")],
-    file_path: Annotated[str, Field(description="Path of the file in repository")],
-    file_content: Annotated[str, Field(description="New content of the file")],
-    commit_message: Annotated[str, Field(description="Commit message")]
-) -> str:
-    """Push modified files to Azure DevOps."""
-    try:
-        service = _get_devops_service()
-        changes = [{
-            "path": file_path,
-            "content": file_content,
-            "change_type": "edit"
-        }]
-        commit_id = await service.push_changes(branch_name, changes, commit_message)
-        return f"Successfully pushed changes. Commit ID: {commit_id}"
-    except Exception as e:
-        return f"Error pushing changes: {str(e)}"
-
-
-async def create_pull_request(
-    source_branch: Annotated[str, Field(description="Source branch with changes")],
-    title: Annotated[str, Field(description="Pull request title")],
-    description: Annotated[str, Field(description="Pull request description")],
-    target_branch: Annotated[str, Field(description="Target branch")] = "main",
-    labels: Annotated[list[str] | None, Field(description="Labels/tags to add to the PR (e.g., ['auto-generated', 'logging'])")] = None
-) -> str:
-    """Create a pull request for the logging changes, optionally with labels."""
-    try:
-        service = _get_devops_service()
-        pr = await service.create_pull_request(
-            source_branch=source_branch,
-            target_branch=target_branch,
-            title=title,
-            description=description,
-            labels=labels
-        )
-        result = f"Successfully created PR #{pr['id']}: {pr['title']}\nURL: {pr['url']}"
-        if pr.get('labels'):
-            result += f"\nLabels: {', '.join(pr['labels'])}"
-        return result
-    except Exception as e:
-        return f"Error creating pull request: {str(e)}"
-
-
-async def list_repository_files(
-    path: Annotated[str, Field(description="Directory path to list")] = "/",
-    branch: Annotated[str, Field(description="Branch name")] = "main"
-) -> str:
-    """List files in the repository."""
-    try:
-        service = _get_devops_service()
-        files = await service.list_files(path, branch)
-        file_list = "\n".join([
-            f"{'📁' if f['is_folder'] else '📄'} {f['path']}"
-            for f in files[:50]  # Limit output
-        ])
-        return f"Found {len(files)} items:\n{file_list}"
-    except Exception as e:
-        return f"Error listing files: {str(e)}"
-
-
-async def get_file_content(
-    file_path: Annotated[str, Field(description="Path to the file")],
-    branch: Annotated[str, Field(description="Branch name")] = "main"
-) -> str:
-    """Get the content of a file from the repository."""
-    try:
-        service = _get_devops_service()
-        content = await service.get_file_content(file_path, branch)
-        return content
-    except Exception as e:
-        return f"Error getting file content: {str(e)}"
-
-
-# Code Analysis Tools
+# File Tools
 def read_local_file(
-    file_path: Annotated[str, Field(description="Full path to the local file")]
+    file_path: Annotated[str, Field(description="Full path to the local file within the cloned code workspace")]
 ) -> str:
-    """Read a file from the local workspace."""
+    """Read a file from the cloned code workspace. Only files within the workspace path are accessible."""
+    error = _validate_path(file_path, "Reading files")
+    if error:
+        return error
+    
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
@@ -137,10 +52,14 @@ def read_local_file(
 
 
 def write_local_file(
-    file_path: Annotated[str, Field(description="Full path to the local file")],
+    file_path: Annotated[str, Field(description="Full path to the local file within the cloned code workspace")],
     content: Annotated[str, Field(description="Content to write")]
 ) -> str:
-    """Write content to a local file."""
+    """Write content to a local file within the cloned code workspace. Cannot write outside workspace."""
+    error = _validate_path(file_path, "Writing files")
+    if error:
+        return error
+    
     try:
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -151,95 +70,122 @@ def write_local_file(
 
 
 def list_local_files(
-    directory: Annotated[str, Field(description="Directory path")],
+    directory: Annotated[str, Field(description="Directory path within the cloned code workspace")],
     pattern: Annotated[str, Field(description="File pattern (e.g., '*.py')")] = "*"
 ) -> str:
-    """List files in a local directory."""
+    """List files in a directory within the cloned code workspace. Only workspace directories are accessible."""
+    error = _validate_path(directory, "Listing files")
+    if error:
+        return error
+    
     try:
         path = Path(directory)
         files = list(path.rglob(pattern))
         # Filter out common non-code directories
         files = [f for f in files if not any(
-            skip in str(f) for skip in ['.git', '__pycache__', 'node_modules', '.venv']
+            skip in str(f) for skip in ['.git', '__pycache__', 'node_modules', '.venv', '.pytest_cache']
         )]
         return "\n".join(str(f) for f in files[:100])
     except Exception as e:
         return f"Error listing files: {str(e)}"
 
 
-# Logging Standards Tools
-def get_logging_standards(standards_path: str = None) -> str:
-    """Get the logging standards documentation that defines how logging should be implemented."""
+# Pytest Tools
+def run_pytest(
+    test_path: Annotated[str, Field(description="Path to test file or directory within the cloned code workspace")],
+    verbose: Annotated[bool, Field(description="Enable verbose output")] = True
+) -> str:
+    """Run pytest on specified path within the cloned code workspace."""
+    error = _validate_path(test_path, "Running pytest")
+    if error:
+        return error
+    
     try:
-        _standards_path = standards_path or "config/logging_standards.md"
-        # Get path relative to project root
+        cmd = ["python", "-m", "pytest", test_path]
+        if verbose:
+            cmd.append("-v")
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+        )
+        
+        output = result.stdout
+        if result.stderr:
+            output += f"\n\nSTDERR:\n{result.stderr}"
+        
+        status = "PASSED" if result.returncode == 0 else "FAILED"
+        return f"Pytest {status} (exit code: {result.returncode})\n\n{output}"
+    except subprocess.TimeoutExpired:
+        return "Error: Pytest timed out after 120 seconds"
+    except Exception as e:
+        return f"Error running pytest: {str(e)}"
+
+
+def run_pytest_with_coverage(
+    test_path: Annotated[str, Field(description="Path to test file or directory within the cloned code workspace")],
+    source_path: Annotated[str, Field(description="Path to source code within the cloned workspace to measure coverage for")]
+) -> str:
+    """Run pytest with coverage report. Both paths must be within the cloned code workspace."""
+    error = _validate_path(test_path, "Running pytest")
+    if error:
+        return error
+    error = _validate_path(source_path, "Measuring coverage")
+    if error:
+        return error
+    
+    try:
+        cmd = [
+            "python", "-m", "pytest",
+            test_path,
+            f"--cov={source_path}",
+            "--cov-report=term-missing",
+            "-v"
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+        )
+        
+        output = result.stdout
+        if result.stderr:
+            output += f"\n\nSTDERR:\n{result.stderr}"
+        
+        return f"Coverage Report:\n{output}"
+    except subprocess.TimeoutExpired:
+        return "Error: Pytest with coverage timed out after 180 seconds"
+    except Exception as e:
+        return f"Error running pytest with coverage: {str(e)}"
+
+
+def get_testing_standards() -> str:
+    """Get the testing standards documentation for pytest best practices."""
+    try:
         root = Path(__file__).parent.parent
-        standards_file = root / _standards_path
+        standards_file = root / "config" / "testing_standards.md"
         
         with open(standards_file, 'r', encoding='utf-8') as f:
             return f.read()
     except Exception as e:
-        return f"Error reading logging standards: {str(e)}"
+        return f"Error reading testing standards: {str(e)}"
 
 
-async def commit_and_push_local_changes(
-    repo_path: Annotated[str, Field(description="Full path to the local git repository")],
-    branch_name: Annotated[str, Field(description="Branch name to commit and push to")],
-    commit_message: Annotated[str, Field(description="Commit message for the changes")]
-) -> str:
-    """Commit all local changes and push to the remote branch using git."""
-    try:
-        repo = git.Repo(repo_path)
-        
-        # Checkout or create the branch
-        if branch_name in [ref.name for ref in repo.refs]:
-            repo.git.checkout(branch_name)
-        else:
-            repo.git.checkout('-b', branch_name)
-        
-        # Stage all changes
-        repo.git.add('--all')
-        
-        # Check if there are changes to commit
-        if not repo.is_dirty() and not repo.untracked_files:
-            return "No changes to commit"
-        
-        # Commit
-        repo.index.commit(commit_message)
-        
-        # Push to remote
-        origin = repo.remote('origin')
-        origin.push(branch_name, set_upstream=True)
-        
-        # Get commit info
-        commit = repo.head.commit
-        changed_files = list(commit.stats.files.keys())
-        
-        return f"Successfully committed and pushed to '{branch_name}'.\nCommit: {commit.hexsha[:8]}\nChanged files: {', '.join(changed_files[:10])}"
-    except Exception as e:
-        return f"Error committing/pushing changes: {str(e)}"
-
-
-# Tool collections for different agent types
-DEVOPS_TOOLS = [
-    clone_repository,
-    create_feature_branch,
-    push_file_changes,
-    commit_and_push_local_changes,
-    create_pull_request,
-    list_repository_files,
-    get_file_content,
-]
-
-CODE_ANALYSIS_TOOLS = [
+# Tool collections
+FILE_TOOLS = [
     read_local_file,
     write_local_file,
     list_local_files,
 ]
 
-LOGGING_TOOLS = [
-    read_local_file,
-    write_local_file,
-    list_local_files,
-    get_logging_standards,
+PYTEST_TOOLS = [
+    run_pytest,
+    run_pytest_with_coverage,
+    get_testing_standards,
 ]

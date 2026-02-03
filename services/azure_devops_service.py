@@ -2,8 +2,8 @@
 Azure DevOps Service - Handles all communication with Azure DevOps
 """
 import os
+import re
 import base64
-import asyncio
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass

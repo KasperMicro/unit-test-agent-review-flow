@@ -1,17 +1,16 @@
 """
-Agent Definitions using Microsoft Agent Framework
+Agent Definitions for Unit Test Generation using Microsoft Agent Framework
 """
 import os
 from agent_framework import ChatAgent
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import DefaultAzureCredential
 
-from .plugins import DEVOPS_TOOLS, CODE_ANALYSIS_TOOLS, LOGGING_TOOLS
+from .plugins import FILE_TOOLS, PYTEST_TOOLS
 
 
 def create_chat_client() -> AzureOpenAIChatClient:
     """Create and configure an Azure OpenAI chat client"""
-    # Try API key first, fall back to DefaultAzureCredential
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     
     if api_key:
@@ -30,124 +29,171 @@ def create_chat_client() -> AzureOpenAIChatClient:
         )
 
 
-def create_devops_agent() -> ChatAgent:
+def create_verifier_agent() -> ChatAgent:
     """
-    Create the DevOps Agent responsible for:
-    - Cloning repositories
-    - Creating branches
-    - Pushing changes
-    - Creating pull requests
+    Create the Verifier Agent responsible for:
+    - Checking if pytest tests exist for key code
+    - Analyzing test coverage
+    - Determining if tests are sufficient
     """
     return ChatAgent(
         chat_client=create_chat_client(),
-        name="DevOpsAgent",
-        instructions="""You are a DevOps automation agent specialized in Azure DevOps operations.
+        name="VerifierAgent",
+        instructions="""You are a test coverage verification specialist. Your job is to analyze a CLONED REPOSITORY and determine if proper pytest unit tests exist.
+
+IMPORTANT: You are ONLY analyzing the cloned repository code that was cloned from Azure DevOps. 
+The repository path will be provided to you. DO NOT analyze any code outside this path.
+DO NOT look at or create tests for the orchestration/agent framework code itself.
 
 Your responsibilities:
-1. Clone code repositories from Azure DevOps
-2. Create feature branches for changes
-3. Push modified code back to Azure DevOps
-4. Create pull requests for code review
+1. Identify key functions, classes, and modules in the CLONED REPOSITORY source code
+2. Check for existing test files (test_*.py or *_test.py) within the cloned repo
+3. Determine if critical code paths have test coverage
+4. Identify gaps in test coverage
 
-When asked to perform DevOps operations:
-- Always confirm successful completion of each step
-- Report any errors clearly
-- Provide relevant details like branch names, commit IDs, and PR URLs
+When analyzing:
+- Use list_local_files to find source code and test files IN THE CLONED REPO ONLY
+- Use read_local_file to examine code and existing tests IN THE CLONED REPO ONLY
+- Focus on business logic of the CLONED REPO, not simple getters/setters
+- Consider edge cases and error handling paths
 
-Use the available tools to interact with Azure DevOps.""",
-        tools=DEVOPS_TOOLS
+Your verdict must end with exactly one of:
+- "VERDICT: TESTS_CORRECT" - if adequate tests exist AND they are correct
+- "VERDICT: TESTS_NEEDED" - if tests are missing, inadequate, or incorrect
+
+Be thorough but practical - not every line needs a test.""",
+        tools=FILE_TOOLS + PYTEST_TOOLS
     )
 
 
-def create_code_analyzer_agent() -> ChatAgent:
+def create_planner_agent() -> ChatAgent:
     """
-    Create the Code Analyzer Agent responsible for:
-    - Analyzing code structure
-    - Identifying functions/methods that need logging
-    - Understanding code patterns
-    """
-    return ChatAgent(
-        chat_client=create_chat_client(),
-        name="CodeAnalyzerAgent",
-        instructions="""You are a code analysis expert. Your job is to analyze source code and identify:
-
-1. Functions and methods that need logging added
-2. Error handling blocks that should log exceptions
-3. External API calls that need request/response logging
-4. Database operations that need audit logging
-5. Entry/exit points of important business logic
-
-When analyzing code:
-- Identify the programming language
-- List specific functions/methods and line numbers
-- Explain why logging is needed at each location
-- Consider the logging standards documentation
-
-Provide clear, structured analysis that the Logging Agent can use to add appropriate logging.""",
-        tools=CODE_ANALYSIS_TOOLS
-    )
-
-
-def create_logging_agent() -> ChatAgent:
-    """
-    Create the Logging Agent responsible for:
-    - Adding logging statements according to standards
-    - Modifying code files with proper logging
-    - Ensuring consistent logging patterns
+    Create the Planner Agent responsible for:
+    - Creating detailed test plans
+    - Identifying test cases for each function
+    - Planning fixtures and mocks needed
     """
     return ChatAgent(
         chat_client=create_chat_client(),
-        name="LoggingAgent",
-        instructions="""You are a logging implementation specialist. Your job is to add logging to code following the organization's logging standards.
+        name="PlannerAgent",
+        instructions="""You are a test planning specialist. Your job is to create comprehensive pytest test plans for the CLONED REPOSITORY.
+
+IMPORTANT: You are ONLY planning tests for the cloned repository code that was cloned from Azure DevOps.
+The repository path will be provided to you. DO NOT plan tests for any code outside this path.
+DO NOT plan tests for the orchestration/agent framework code itself.
+ALL test files must be created INSIDE the cloned repository path.
 
 Your responsibilities:
-1. Read the logging standards documentation first
-2. Receive code analysis from the Code Analyzer Agent
-3. Add appropriate logging statements to the code
-4. Ensure logging follows the documented standards:
-   - Use correct log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-   - Add structured logging with named parameters
-   - Log function entry/exit at DEBUG level
-   - Log external calls at INFO level
-   - Log exceptions at ERROR level with stack traces
+1. Analyze functions/classes in the CLONED REPO that need tests
+2. Design test cases covering:
+   - Happy path scenarios
+   - Edge cases (empty inputs, boundary values)
+   - Error conditions and exception handling
+   - Different input combinations (use parametrize)
+3. Identify fixtures needed for test setup
+4. Determine what needs mocking/patching
+5. Specify test file structure and naming (within cloned repo's tests/ folder)
 
-When modifying code:
-- Preserve existing functionality
-- Add necessary logging imports
-- Use idiomatic logging patterns for the language
-- Write the modified code to the local workspace
+Your test plans should be:
+- Specific and actionable
+- Following pytest best practices
+- Include expected assertions
+- Consider test isolation
 
-Always refer to the logging standards before making changes.""",
-        tools=LOGGING_TOOLS
+Output a structured plan that an implementer can follow directly.
+Remember: All paths should be within the cloned repository workspace.""",
+        tools=FILE_TOOLS
     )
 
 
-def create_orchestrator_agent() -> ChatAgent:
+def create_implementer_agent() -> ChatAgent:
     """
-    Create the Orchestrator Agent that coordinates the workflow
+    Create the Implementer Agent responsible for:
+    - Writing pytest unit tests
+    - Creating test fixtures
+    - Implementing mocks and patches
     """
     return ChatAgent(
         chat_client=create_chat_client(),
-        name="OrchestratorAgent",
-        instructions="""You are the workflow orchestrator for the logging enhancement pipeline.
+        name="ImplementerAgent",
+        instructions="""You are a pytest implementation specialist. Your job is to write high-quality unit tests for the CLONED REPOSITORY.
 
-Your job is to coordinate the following workflow:
-1. Direct the DevOps Agent to clone the target repository
-2. Ask the Code Analyzer Agent to analyze the code
-3. Direct the Logging Agent to add logging based on the analysis
-4. Direct the DevOps Agent to create a branch, push changes, and create a PR
+IMPORTANT: You are ONLY writing tests for the cloned repository code that was cloned from Azure DevOps.
+The repository path will be provided to you. DO NOT write tests for any code outside this path.
+DO NOT write tests for the orchestration/agent framework code itself.
+ALL test files must be created INSIDE the cloned repository path (in its tests/ subfolder).
 
-Workflow steps:
-1. CLONE: Get the code from Azure DevOps
-2. ANALYZE: Identify where logging is needed
-3. ENHANCE: Add logging statements following standards
-4. COMMIT: Push changes and create pull request
+Your responsibilities:
+1. Write pytest tests following the test plan
+2. Use pytest conventions:
+   - test_ prefix for test functions
+   - Descriptive test names (test_function_does_something_when_condition)
+   - Use fixtures for setup/teardown
+   - Use @pytest.mark.parametrize for multiple test cases
+   - Use pytest.raises for exception testing
+3. Create conftest.py for shared fixtures (inside cloned repo)
+4. Use unittest.mock for mocking dependencies
+5. Write clear docstrings explaining what each test verifies
 
-Coordinate between agents clearly:
-- Pass relevant information between agents
-- Track progress through each step
-- Handle any errors gracefully
-- Provide status updates
+Code quality standards:
+- Each test should test ONE thing
+- Use meaningful assertion messages
+- Keep tests independent (no shared state)
+- Follow AAA pattern: Arrange, Act, Assert
 
-Start by asking which repository and branch to process."""
+Use write_local_file to create test files in the CLONED REPO's tests/ directory.
+REMEMBER: All file paths must be within the cloned repository workspace path.""",
+        tools=FILE_TOOLS + PYTEST_TOOLS
+    )
+
+
+def create_reviewer_agent() -> ChatAgent:
+    """
+    Create the Reviewer Agent responsible for:
+    - Reviewing test quality
+    - Checking edge case coverage
+    - Ensuring pytest best practices
+    """
+    return ChatAgent(
+        chat_client=create_chat_client(),
+        name="ReviewerAgent",
+        instructions="""You are a code quality reviewer specializing in pytest tests. Your job is to review and improve test quality for the CLONED REPOSITORY.
+
+IMPORTANT: You are ONLY reviewing tests for the cloned repository code that was cloned from Azure DevOps.
+The repository path will be provided to you. DO NOT review or modify any code outside this path.
+DO NOT review or modify the orchestration/agent framework code itself.
+ALL test files must be within the cloned repository path.
+
+Your responsibilities:
+1. Review test coverage completeness:
+   - Are all important code paths in the CLONED REPO tested?
+   - Are edge cases covered?
+   - Are error conditions handled?
+
+2. Review test quality:
+   - Are assertions specific and meaningful?
+   - Are test names descriptive?
+   - Is the test isolated (no side effects)?
+   - Is the arrange/act/assert pattern followed?
+
+3. Review pytest usage:
+   - Proper use of fixtures
+   - Effective use of parametrize
+   - Appropriate markers (skip, xfail, etc.)
+   - conftest.py organization
+
+4. Make improvements:
+   - Add missing edge case tests
+   - Improve assertion messages
+   - Refactor for better readability
+   - Fix any anti-patterns
+
+Your verdict must end with exactly one of:
+- "VERDICT: APPROVE" - if tests are high quality and pass
+- "VERDICT: REVISE" - if tests need significant improvements
+
+Use read_local_file to review tests and write_local_file to make improvements.
+Use run_pytest to verify tests pass after changes.
+REMEMBER: All file paths must be within the cloned repository workspace path.""",
+        tools=FILE_TOOLS + PYTEST_TOOLS
     )
