@@ -5,12 +5,13 @@ IMPORTANT: All file operations are restricted to the workspace path (cloned code
 to prevent agents from modifying the orchestration code itself.
 """
 import os
+import sys
 import subprocess
 from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 
-
+#--------------------------------Path Validation--------------------------------#
 def _get_allowed_workspace() -> Path:
     """Get the allowed workspace path from environment."""
     workspace = os.getenv("WORKSPACE_PATH", "./cloned_code")
@@ -35,7 +36,7 @@ def _validate_path(file_path: str, operation: str) -> str | None:
     return None
 
 
-# File Tools
+#--------------------------------File Tools--------------------------------#
 def read_local_file(
     file_path: Annotated[str, Field(description="Full path to the local file within the cloned code workspace")]
 ) -> str:
@@ -90,7 +91,37 @@ def list_local_files(
         return f"Error listing files: {str(e)}"
 
 
-# Pytest Tools
+#--------------------------------Pytest Tools--------------------------------#
+def _ensure_pytest_installed() -> str | None:
+    """Ensure pytest is installed, install if missing. Returns error message or None."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            return None  # pytest is installed
+    except Exception:
+        pass
+    
+    # Try to install pytest
+    try:
+        print("Installing pytest...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "pytest", "pytest-cov"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            return None  # Successfully installed
+        return f"Failed to install pytest: {result.stderr}"
+    except Exception as e:
+        return f"Error installing pytest: {str(e)}"
+
+
 def run_pytest(
     test_path: Annotated[str, Field(description="Path to test file or directory within the cloned code workspace")],
     verbose: Annotated[bool, Field(description="Enable verbose output")] = True
@@ -100,8 +131,14 @@ def run_pytest(
     if error:
         return error
     
+    # Ensure pytest is installed
+    install_error = _ensure_pytest_installed()
+    if install_error:
+        return install_error
+    
     try:
-        cmd = ["python", "-m", "pytest", test_path]
+        # Use sys.executable to ensure we use the same Python environment
+        cmd = [sys.executable, "-m", "pytest", test_path]
         if verbose:
             cmd.append("-v")
         
@@ -137,9 +174,14 @@ def run_pytest_with_coverage(
     if error:
         return error
     
+    # Ensure pytest is installed
+    install_error = _ensure_pytest_installed()
+    if install_error:
+        return install_error
+    
     try:
         cmd = [
-            "python", "-m", "pytest",
+            sys.executable, "-m", "pytest",
             test_path,
             f"--cov={source_path}",
             "--cov-report=term-missing",
@@ -164,7 +206,7 @@ def run_pytest_with_coverage(
     except Exception as e:
         return f"Error running pytest with coverage: {str(e)}"
 
-
+#--------------------------------Testing Standards--------------------------------#
 def get_testing_standards() -> str:
     """Get the testing standards documentation for pytest best practices."""
     try:
@@ -177,7 +219,7 @@ def get_testing_standards() -> str:
         return f"Error reading testing standards: {str(e)}"
 
 
-# Tool collections
+#--------------------------------Tool Collections--------------------------------#
 FILE_TOOLS = [
     read_local_file,
     write_local_file,

@@ -4,7 +4,7 @@ using the declarative WorkflowBuilder pattern.
 """
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Any, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -26,18 +26,18 @@ from agents import (
     create_implementer_agent,
     create_reviewer_agent,
 )
+from agents.quality_evaluation import VerifierOutput, ReviewerOutput
 from services.azure_devops_service import create_devops_service_from_env
 
-# Flags for test and approved tests
 
 class VerifierDecision(str, Enum):
-    """Verifier agent decisions"""
-    TESTS_CORRECT = "tests_correct"      # Tests exist and are correct → PR
+    """Verifier agent decisions for workflow routing"""
+    TESTS_CORRECT = "tests_correct"      # Tests exist and are correct → Complete
     TESTS_NEEDED = "tests_needed"        # Tests missing or incorrect → Planner
 
 
 class ReviewerDecision(str, Enum):
-    """Reviewer agent decisions"""
+    """Reviewer agent decisions for workflow routing"""
     APPROVED = "approved"                # Review passed → PR
     REVISE = "revise"                    # Review failed → back to Planner
 
@@ -53,53 +53,86 @@ class OrchestrationConfig:
 
 
 async def _route_verifier_decision(response: AgentExecutorResponse, ctx: WorkflowContext[VerifierDecision]) -> None:
-    """Route based on verifier agent's decision.
+    """Route based on verifier agent's structured output decision.
+    
+    The agent uses response_format=VerifierOutput, so response.agent_response.value
+    contains the parsed Pydantic model directly.
     
     Args:
         response: AgentExecutorResponse from verifier agent
         ctx: Workflow context with shared state
     """
-    # Extract text from agent response
-    message = response.agent_response.text if response.agent_response else ""
+    print(f"\n" + "="*70)
+    print(f"🔍 VERIFIER AGENT - Analysis Complete")
+    print("="*70)
     
-    print(f"\n🔍 Verifier analysis complete.")
+    # Show agent's raw text output (truncated)
+    text = response.agent_response.text or ""
+    if text:
+        print(f"\n📤 Agent Output (truncated):")
+        print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
     # Get run kwargs from shared state
     run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
     results = run_kwargs.get("results", {"steps": []})
     
-    # Store the verifier output
-    await ctx.set_shared_state("verifier_report", message)
+    # Get structured output directly from agent response (guaranteed by response_format)
+    verifier_output: VerifierOutput = response.agent_response.value
     
-    # Verifying if test exists and are correct
-    if "VERDICT: TESTS_CORRECT" in message.upper() or "TESTS_CORRECT" in message.upper():
-        print("   ✅ Tests are correct! Proceeding to create PR.")
+    if verifier_output is None:
+        # Fallback if response parsing somehow failed
+        print("\n❌ Could not parse verifier response. Defaulting to tests needed.")
+        await ctx.set_shared_state("verifier_report", text[:500])
+        await ctx.set_shared_state("verifier_feedback", text)
+        results["steps"].append({
+            "step": "verify", 
+            "success": False,
+            "decision": "tests_needed",
+            "error": "structured_output_missing"
+        })
+        await ctx.send_message(VerifierDecision.TESTS_NEEDED)
+        return
+    
+    # Show structured decision
+    print(f"\n📊 Structured Decision:")
+    print(f"   tests_exist_and_correct = {verifier_output.tests_exist_and_correct}")
+    print(f"\n💬 Feedback:")
+    print(f"   {verifier_output.feedback}")
+    
+    # Store feedback for downstream agents
+    await ctx.set_shared_state("verifier_report", verifier_output.feedback)
+    await ctx.set_shared_state("verifier_feedback", verifier_output.feedback)
+    
+    if verifier_output.tests_exist_and_correct:
+        print(f"\n➡️  Routing: TESTS_CORRECT → Workflow Complete (no changes needed)")
         results["steps"].append({
             "step": "verify", 
             "success": True,
-            "decision": "tests_correct"
+            "decision": "tests_correct",
+            "feedback": verifier_output.feedback
         })
         await ctx.send_message(VerifierDecision.TESTS_CORRECT)
     else:
-        print("   📝 Tests needed. Proceeding to planning...")
+        print(f"\n➡️  Routing: TESTS_NEEDED → Planner Agent")
         results["steps"].append({
             "step": "verify", 
             "success": True,
-            "decision": "tests_needed"
+            "decision": "tests_needed",
+            "feedback": verifier_output.feedback
         })
         await ctx.send_message(VerifierDecision.TESTS_NEEDED)
 
 
 async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: WorkflowContext[ReviewerDecision]) -> None:
-    """Route based on reviewer agent's decision.
+    """Route based on reviewer agent's structured output decision.
+    
+    The agent uses response_format=ReviewerOutput, so response.agent_response.value
+    contains the parsed Pydantic model directly.
     
     Args:
         response: AgentExecutorResponse from reviewer agent
         ctx: Workflow context with shared state
     """
-    # Extract text from agent response
-    message = response.agent_response.text if response.agent_response else ""
-    
     # Get run kwargs from shared state
     run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
     
@@ -112,44 +145,89 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
     max_revisions = run_kwargs.get("max_revisions", 3)
     results = run_kwargs.get("results", {"steps": []})
     
-    print(f"\n🔎 Review complete (revision #{revision_count + 1}).")
+    print(f"\n" + "="*70)
+    print(f"🔎 REVIEWER AGENT - Review Complete (Revision #{revision_count + 1})")
+    print("="*70)
     
-    # Store review output
-    await ctx.set_shared_state("review_summary", message)
+    # Show agent's raw text output (truncated)
+    text = response.agent_response.text or ""
+    if text:
+        print(f"\n📤 Agent Output (truncated):")
+        print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
-    # Check for approval indicators
-    approved_indicators = ["APPROVED", "LGTM", "LOOKS GOOD", "REVIEW: PASSED", "VERDICT: APPROVED"]
-    revise_indicators = ["REVISE", "NEEDS WORK", "CHANGES NEEDED", "REVIEW: FAILED", "VERDICT: REVISE"]
+    # Get structured output directly from agent response (guaranteed by response_format)
+    reviewer_output: ReviewerOutput = response.agent_response.value
     
-    is_approved = any(ind in message.upper() for ind in approved_indicators)
-    needs_revision = any(ind in message.upper() for ind in revise_indicators)
+    if reviewer_output is None:
+        # Fallback if response parsing somehow failed
+        print("\n❌ Could not parse reviewer response!")
+        text = response.agent_response.text or ""
+        
+        if revision_count >= max_revisions:
+            print(f"   ⚠️ Max revisions reached. Forcing PR.")
+            await ctx.set_shared_state("review_summary", f"Forced after {max_revisions} revisions")
+            results["steps"].append({
+                "step": "review", 
+                "success": False,
+                "decision": "approved",
+                "revision": revision_count + 1,
+                "error": "structured_output_missing"
+            })
+            await ctx.send_message(ReviewerDecision.APPROVED)
+        else:
+            print("   🔄 Forcing revision.")
+            await ctx.set_shared_state("revision_count", revision_count + 1)
+            await ctx.set_shared_state("review_feedback", text[:500])
+            results["steps"].append({
+                "step": "review", 
+                "success": False,
+                "decision": "revise",
+                "revision": revision_count + 1,
+                "error": "structured_output_missing"
+            })
+            await ctx.send_message(ReviewerDecision.REVISE)
+        return
     
-    # Force approval if max revisions reached, COMMENT: Should we have this?
-    if revision_count >= max_revisions:
-        print(f"   ⚠️ Max revisions ({max_revisions}) reached. Proceeding with PR.")
+    print(f"\n📊 Structured Decision:")
+    print(f"   approved = {reviewer_output.approved}")
+    print(f"\n💬 Feedback:")
+    print(f"   {reviewer_output.feedback}")
+    
+    # Store feedback for downstream agents
+    await ctx.set_shared_state("review_summary", reviewer_output.feedback)
+    
+    # Check approval
+    is_approved = reviewer_output.approved
+    
+    # Force approval if max revisions reached (escape hatch)
+    if revision_count >= max_revisions and not is_approved:
+        print(f"\n⚠️ Max revisions ({max_revisions}) reached. Forcing approval.")
         is_approved = True
-        needs_revision = False
     
-    if is_approved and not needs_revision:
-        print("   ✅ Review passed! Proceeding to create PR.")
+    if is_approved:
+        print(f"\n➡️  Routing: APPROVED → Create PR")
         results["steps"].append({
             "step": "review", 
             "success": True,
             "decision": "approved",
-            "revision": revision_count + 1
+            "revision": revision_count + 1,
+            "feedback": reviewer_output.feedback
         })
         await ctx.send_message(ReviewerDecision.APPROVED)
     else:
-        print("   🔄 Revision needed. Going back to planner...")
+        print(f"\n➡️  Routing: REVISE → Planner Agent (revision #{revision_count + 2})")
+        print(f"      Feedback: {reviewer_output.feedback[:150]}...")
         await ctx.set_shared_state("revision_count", revision_count + 1)
-        await ctx.set_shared_state("review_feedback", message)
+        await ctx.set_shared_state("review_feedback", reviewer_output.feedback)
         results["steps"].append({
             "step": "review", 
             "success": True,
             "decision": "revise",
-            "revision": revision_count + 1
+            "revision": revision_count + 1,
+            "feedback": reviewer_output.feedback
         })
         await ctx.send_message(ReviewerDecision.REVISE)
+
 
 #-----------------------------Creating Pull Request-----------------------------#
 async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
@@ -159,7 +237,9 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
         message: Output from previous executor (decision enum or string)
         ctx: Workflow context with shared state
     """
-    print("\n🚀 Creating pull request...")
+    print("\n" + "="*70)
+    print("CODE CHANGES SUMMARY")
+    print("="*70)
     
     # Get run kwargs from shared state
     run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
@@ -168,21 +248,51 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
     devops_service = run_kwargs.get("devops_service")
     results = run_kwargs.get("results", {"steps": []})
     
+    # Check for changes BEFORE creating branch
+    repo = git.Repo(repo_path)
+    repo.git.add('--all')
+    
+    # Show detailed file changes
+    if repo.untracked_files:
+        print("\nNew Files Added:")
+        for f in repo.untracked_files:
+            print(f"   + {f}")
+    
+    # Show modified files  
+    try:
+        changed_files = [item.a_path for item in repo.index.diff(repo.head.commit)]
+        if changed_files:
+            print("\nModified Files:")
+            for f in changed_files:
+                print(f"   ~ {f}")
+    except Exception:
+        pass  # No previous commit to diff against
+    
+    if not repo.is_dirty() and not repo.untracked_files:
+        print("\nNo changes to commit - skipping PR creation.")
+        results["steps"].append({
+            "step": "create_pr", 
+            "success": True,
+            "status": "skipped", 
+            "reason": "no changes"
+        })
+        await ctx.send_message("No changes to commit - skipping PR creation.")
+        return
+    
+    print("   🚀 Creating pull request...")
     branch_name = f"{config.feature_branch_prefix}{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     
     try:
         # Create branch on remote
         await devops_service.create_branch(branch_name, config.target_branch)
         
-        # Commit and push local changes
-        repo = git.Repo(repo_path)
-        
-        # Check if already on a branch or detached HEAD
+        # Checkout the new branch
         try:
             repo.git.checkout('-b', branch_name)
         except git.GitCommandError:
             repo.git.checkout(branch_name)
         
+        # Stage changes again after checkout (in case checkout reset staging)
         repo.git.add('--all')
         
         if repo.is_dirty() or repo.untracked_files:
@@ -224,14 +334,15 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
             print(f"   ✅ PR #{pr['id']} created!")
             await ctx.send_message(f"Pull request #{pr['id']} created successfully!")
         else:
-            print("   ℹ️ No changes to commit.")
+            # This shouldn't happen since we check early, but handle gracefully
+            print("   ⚠️ Changes lost after checkout - no changes to commit.")
             results["steps"].append({
                 "step": "create_pr", 
                 "success": True,
                 "status": "skipped", 
-                "reason": "no changes"
+                "reason": "changes lost after checkout"
             })
-            await ctx.send_message("No changes to commit - skipping PR creation.")
+            await ctx.send_message("No changes to commit after checkout.")
             
     except Exception as e:
         print(f"   ❌ PR creation failed: {e}")
@@ -247,6 +358,176 @@ async def _handle_complete(message: str, ctx: WorkflowContext[str, str]) -> None
     """Handle workflow completion."""
     print("\n✅ Workflow completed successfully!")
     await ctx.yield_output("Workflow completed")
+
+
+async def _handle_tests_already_correct(message: Any, ctx: WorkflowContext[str]) -> None:
+    """Handle case when tests already exist and are correct - no PR needed."""
+    print("\n✅ Tests already exist and are correct!")
+    print("   ℹ️ No changes needed - skipping PR creation.")
+    
+    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    results = run_kwargs.get("results", {"steps": []})
+    results["steps"].append({
+        "step": "complete", 
+        "success": True,
+        "status": "skipped",
+        "reason": "tests_already_correct"
+    })
+    
+    await ctx.yield_output("Tests already correct - no action needed")
+
+
+async def _log_planner_output(response: AgentExecutorResponse, ctx: WorkflowContext[str]) -> None:
+    """Log planner output before it goes to implementer."""
+    print("\n" + "="*70)
+    print("PLANNER AGENT - Output")
+    print("="*70)
+    
+    output_text = str(response.agent_response.text) if response.agent_response else "No output"
+    print("\nPlanner's Test Plan:")
+    print("-"*50)
+    # Show truncated output
+    print(output_text[:1200] + "..." if len(output_text) > 1200 else output_text)
+    print("-"*50)
+    
+    print("\n" + "="*70)
+    print("IMPLEMENTER AGENT - Input") 
+    print("="*70)
+    print("  Receiving planner's test plan to implement...")
+    
+    # Forward the message
+    await ctx.send_message(output_text)
+
+
+async def _log_implementer_output(response: AgentExecutorResponse, ctx: WorkflowContext[str]) -> None:
+    """Log implementer output before it goes to reviewer."""
+    print("\n" + "="*70)
+    print("IMPLEMENTER AGENT - Output")
+    print("="*70)
+    
+    output_text = str(response.agent_response.text) if response.agent_response else "No output"
+    print("\nImplementer's Response:")
+    print("-"*50)
+    # Show truncated output
+    print(output_text[:1000] + "..." if len(output_text) > 1000 else output_text)
+    print("-"*50)
+    
+    print("\n" + "="*70)
+    print("REVIEWER AGENT - Input")
+    print("="*70)
+    print("  Reviewing implemented tests for quality...")
+    
+    # Forward the message
+    await ctx.send_message(output_text)
+
+
+async def _prepare_planner_from_verifier(message: Any, ctx: WorkflowContext[str]) -> None:
+    """Prepare planner input with verifier feedback for initial planning."""
+    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    repo_path = run_kwargs.get("repo_path")
+    
+    # Get the verifier feedback (structured)
+    try:
+        verifier_feedback = await ctx.get_shared_state("verifier_feedback")
+    except KeyError:
+        verifier_feedback = "Tests are needed for this repository."
+    
+    # Get functions needing tests if available
+    try:
+        functions_needing_tests = await ctx.get_shared_state("functions_needing_tests")
+        functions_list = "\n".join(f"  - {func}" for func in functions_needing_tests) if functions_needing_tests else ""
+    except KeyError:
+        functions_list = ""
+    
+    print(f"\n" + "="*70)
+    print(f"📋 PLANNER AGENT - Input (Initial)")
+    print("="*70)
+    
+    # Build a message for the planner with verifier's analysis
+    planner_message = f"""CREATE TEST PLAN
+
+The verifier has analyzed the repository and determined tests are needed.
+
+**Repository Path:** {repo_path}
+
+**Verifier Analysis:**
+{verifier_feedback}
+"""
+    
+    if functions_list:
+        planner_message += f"""
+**Functions/Classes Needing Tests:**
+{functions_list}
+"""
+    
+    planner_message += """
+**Your Task:**
+Create a comprehensive pytest test plan addressing the verifier's feedback.
+Focus on the specific functions and gaps identified.
+Ensure test coverage for edge cases and error handling."""
+    
+    print(f"\nInput Message to Planner:")
+    print("-"*50)
+    print(planner_message[:800] + "..." if len(planner_message) > 800 else planner_message)
+    print("-"*50)
+    await ctx.send_message(planner_message)
+
+
+async def _prepare_planner_with_feedback(message: Any, ctx: WorkflowContext[str]) -> None:
+    """Prepare planner input with structured review feedback when revision is needed."""
+    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    repo_path = run_kwargs.get("repo_path")
+    
+    # Get the review feedback (structured)
+    try:
+        review_feedback = await ctx.get_shared_state("review_feedback")
+    except KeyError:
+        review_feedback = "No specific feedback provided."
+    
+    # Get specific issues if available
+    try:
+        review_issues = await ctx.get_shared_state("review_issues")
+        issues_list = "\n".join(f"  - {issue}" for issue in review_issues) if review_issues else ""
+    except KeyError:
+        issues_list = ""
+    
+    try:
+        revision_count = await ctx.get_shared_state("revision_count")
+    except KeyError:
+        revision_count = 1
+    
+    print(f"\n" + "="*70)
+    print(f"📋 PLANNER AGENT - Input (Revision #{revision_count})")
+    print("="*70)
+    
+    # Build a message for the planner that includes the structured feedback
+    planner_message = f"""REVISION #{revision_count} REQUIRED
+
+The previous test implementation was reviewed and needs improvements.
+
+**Reviewer Feedback:**
+{review_feedback}
+"""
+    
+    if issues_list:
+        planner_message += f"""
+**Specific Issues to Address:**
+{issues_list}
+"""
+    
+    planner_message += f"""
+**Your Task:**
+Analyze the reviewer's feedback above and create an updated test plan for {repo_path}.
+Address ALL issues mentioned in the feedback.
+Focus on the specific problems identified by the reviewer.
+
+Create a revised test plan that fixes these issues."""
+    
+    print(f"\n📥 Input Message to Planner:")
+    print("-"*50)
+    print(planner_message[:800] + "..." if len(planner_message) > 800 else planner_message)
+    print("-"*50)
+    await ctx.send_message(planner_message)
 
 
 #-----------------------------UnitTestOrchestration Class-----------------------------#
@@ -268,9 +549,9 @@ class UnitTestOrchestration:
               │ TESTS_CORRECT                   │ TESTS_NEEDED
               ▼                                 ▼
         ┌──────────┐                     ┌──────────────┐
-        │Create PR │                     │   Planner    │◄──────┐
-        └──────────┘                     └──────┬───────┘       │
-                                                ▼               │
+        │ Complete │                     │   Planner    │◄──────┐
+        │no action │                     └──────┬───────┘       │
+        └──────────┘                            ▼               │
                                          ┌──────────────┐       │
                                          │ Implementer  │       │
                                          └──────┬───────┘       │
@@ -280,7 +561,7 @@ class UnitTestOrchestration:
                                          └──────┬───────┘       │
                                                 │               │
                                ┌────────────────┴───────┐       │
-                               │ APPROVED               │ REVISE│
+                               │ APPROVED               │ REVISE│ (with feedback)
                                ▼                        └───────┘
                          ┌──────────┐
                          │Create PR │
@@ -322,6 +603,11 @@ class UnitTestOrchestration:
         reviewer_routing = FunctionExecutor(_route_reviewer_decision, id="reviewer_routing")
         create_pr_executor = FunctionExecutor(_create_pull_request, id="create_pr")
         handle_complete = FunctionExecutor(_handle_complete, id="complete")
+        handle_tests_correct = FunctionExecutor(_handle_tests_already_correct, id="tests_correct")
+        prepare_planner_initial = FunctionExecutor(_prepare_planner_from_verifier, id="prepare_initial")
+        prepare_planner_revision = FunctionExecutor(_prepare_planner_with_feedback, id="prepare_revision")
+        log_planner_output = FunctionExecutor(_log_planner_output, id="log_planner")
+        log_implementer_output = FunctionExecutor(_log_implementer_output, id="log_implementer")
         
         #----------------------------- Build Workflow -----------------------------#
         self.workflow = (
@@ -331,23 +617,33 @@ class UnitTestOrchestration:
             .add_switch_case_edge_group(
                 verifier_routing,
                 [
-                    Case(condition=lambda msg: msg == VerifierDecision.TESTS_CORRECT, target=create_pr_executor),
-                    Default(target=planner_executor),
+                    # Tests already correct → complete without PR
+                    Case(condition=lambda msg: msg == VerifierDecision.TESTS_CORRECT, target=handle_tests_correct),
+                    # Tests needed → prepare planner with verifier feedback
+                    Default(target=prepare_planner_initial),
                 ]
             )
-            .add_edge(planner_executor, implementer_executor)
-            .add_edge(implementer_executor, reviewer_executor)
+            # Route initial preparation to planner, log output, then to implementer
+            .add_edge(prepare_planner_initial, planner_executor)
+            .add_edge(planner_executor, log_planner_output)
+            .add_edge(log_planner_output, implementer_executor)
+            .add_edge(implementer_executor, log_implementer_output)
+            .add_edge(log_implementer_output, reviewer_executor)
             .add_edge(reviewer_executor, reviewer_routing)
             .add_switch_case_edge_group(
                 reviewer_routing,
                 [
-                    Case(condition=lambda msg: msg == ReviewerDecision.REVISE, target=planner_executor),
-                    Default(target=create_pr_executor),  # Handles APPROVED and any fallback
+                    # Revision needed → prepare feedback and go to planner
+                    Case(condition=lambda msg: msg == ReviewerDecision.REVISE, target=prepare_planner_revision),
+                    # Approved → create PR
+                    Default(target=create_pr_executor),
                 ]
             )
+            # Route revision preparation to planner
+            .add_edge(prepare_planner_revision, planner_executor)
             .add_edge(create_pr_executor, handle_complete)
-            # Calculate max iterations: initial(6) + revisions(4 each) + final(2) + buffer
-            .set_max_iterations((self.config.max_revision_iterations + 1) * 6 + 10)
+            # Calculate max iterations: initial(7) + revisions(5 each with feedback step) + final(2) + buffer
+            .set_max_iterations((self.config.max_revision_iterations + 1) * 7 + 12)
             .build()
         )
         
@@ -383,26 +679,36 @@ class UnitTestOrchestration:
             print(f"   🔒 Agents restricted to workspace: {self._repo_path}")
             
             # Step 2: Run the agent workflow
-            print("\n🚀 Starting agent workflow...")
+            print("\n" + "="*70)
+            print("STARTING AGENT WORKFLOW")
+            print("="*70)
             
             #----------------------------- Initial Message for Verifier -----------------------------#
-            # Create initial message for verifier
+            print("\n" + "="*70)
+            print("VERIFIER AGENT - Input")
+            print("="*70)
+            
+            # Create initial message for verifier (uses structured output)
             initial_message = f"""Analyze the code in {self._repo_path} and check if proper pytest unit tests exist.
 
 Look for:
 - Key functions and classes in the source code
 - Existing test files (test_*.py or *_test.py)
 - Whether critical code paths have test coverage
-- If tests exist, verify they are CORRECT (pass, have good coverage, follow best practices)
+- If tests exist, run them to verify they pass and follow best practices
 
-Report:
+Analyze and report on:
 1. List of key functions/classes found
 2. Existing test files found
 3. Test quality assessment (if tests exist)
+4. Gaps in test coverage
 
-IMPORTANT - End your response with exactly one of these verdicts:
-- "VERDICT: TESTS_CORRECT" - if tests exist AND are correct/sufficient
-- "VERDICT: TESTS_NEEDED" - if tests are missing, incomplete, or incorrect"""
+Your structured output will determine the next steps in the workflow."""
+            
+            print("\nInput Message:")
+            print("-"*50)
+            print(initial_message[:600] + "..." if len(initial_message) > 600 else initial_message)
+            print("-"*50)
             
             # Run the workflow with initial state passed via kwargs
             # These will be stored in SharedState under "_workflow_run_kwargs"
@@ -417,10 +723,9 @@ IMPORTANT - End your response with exactly one of these verdicts:
             )
             
             # Extract final results from workflow outputs
-            for event in workflow_result.events:
-                # Check for output events that might contain results
-                if hasattr(event, 'output'):
-                    print(f"   Output: {event.output}")
+            outputs = workflow_result.get_outputs()
+            for output in outputs:
+                print(f"   Output: {output}")
 
             results["status"] = "completed"
             results["completed_at"] = datetime.now().isoformat()
