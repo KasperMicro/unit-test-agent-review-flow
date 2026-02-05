@@ -7,25 +7,29 @@ from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import DefaultAzureCredential
 
 from .plugins import FILE_TOOLS, PYTEST_TOOLS
+from .quality_evaluation import VerifierOutput, ReviewerOutput
 
 
 def create_chat_client() -> AzureOpenAIChatClient:
     """Create and configure an Azure OpenAI chat client"""
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     
+    # Note: API version 2024-08-01-preview or later required for structured outputs
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    
     if api_key:
         return AzureOpenAIChatClient(
             endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
             api_key=api_key,
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+            api_version=api_version
         )
     else:
         return AzureOpenAIChatClient(
             endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
             credential=DefaultAzureCredential(),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+            api_version=api_version
         )
 
 
@@ -49,20 +53,25 @@ Your responsibilities:
 1. Identify key functions, classes, and modules in the CLONED REPOSITORY source code
 2. Check for existing test files (test_*.py or *_test.py) within the cloned repo
 3. Determine if critical code paths have test coverage
-4. Identify gaps in test coverage
+4. Compare against internal testing guidelines and best practices
+5. Identify gaps in test coverage
 
 When analyzing:
 - Use list_local_files to find source code and test files IN THE CLONED REPO ONLY
 - Use read_local_file to examine code and existing tests IN THE CLONED REPO ONLY
+- Use run_pytest to verify existing tests pass
+- Use get_testing_standards to load the internal testing guidelines and compare against them
 - Focus on business logic of the CLONED REPO, not simple getters/setters
 - Consider edge cases and error handling paths
 
-Your verdict must end with exactly one of:
-- "VERDICT: TESTS_CORRECT" - if adequate tests exist AND they are correct
-- "VERDICT: TESTS_NEEDED" - if tests are missing, inadequate, or incorrect
+Provide a clear analysis including:
+- What tests exist and whether they pass
+- What functions/classes need test coverage
+- Overall assessment of whether the test suite is adequate
 
 Be thorough but practical - not every line needs a test.""",
-        tools=FILE_TOOLS + PYTEST_TOOLS
+        tools=FILE_TOOLS + PYTEST_TOOLS,
+        default_options={'response_format': VerifierOutput}
     )
 
 
@@ -100,9 +109,12 @@ Your test plans should be:
 - Include expected assertions
 - Consider test isolation
 
+IMPORTANT: First call get_testing_standards() to load the internal testing guidelines.
+Your test plan MUST follow these guidelines.
+
 Output a structured plan that an implementer can follow directly.
 Remember: All paths should be within the cloned repository workspace.""",
-        tools=FILE_TOOLS
+        tools=FILE_TOOLS + PYTEST_TOOLS
     )
 
 
@@ -140,6 +152,9 @@ Code quality standards:
 - Use meaningful assertion messages
 - Keep tests independent (no shared state)
 - Follow AAA pattern: Arrange, Act, Assert
+
+IMPORTANT: First call get_testing_standards() to load the internal testing guidelines.
+Follow these guidelines when writing tests.
 
 Use write_local_file to create test files in the CLONED REPO's tests/ directory.
 REMEMBER: All file paths must be within the cloned repository workspace path.""",
@@ -182,18 +197,30 @@ Your responsibilities:
    - Appropriate markers (skip, xfail, etc.)
    - conftest.py organization
 
-4. Make improvements:
-   - Add missing edge case tests
-   - Improve assertion messages
-   - Refactor for better readability
-   - Fix any anti-patterns
+4. Compare against internal guidelines:
+   - FIRST call get_testing_standards() to load guidelines
+   - Does the code follow these testing standards?
+   - Are best practices being followed?
 
-Your verdict must end with exactly one of:
-- "VERDICT: APPROVE" - if tests are high quality and pass
-- "VERDICT: REVISE" - if tests need significant improvements
+5. Optionally run tests if you want to verify syntax:
+   - Use run_pytest to execute tests
+   - NOTE: Test execution failures due to missing dependencies or environment issues should NOT block approval
 
-Use read_local_file to review tests and write_local_file to make improvements.
-Use run_pytest to verify tests pass after changes.
+APPROVAL CRITERIA (set approved=true if these are met):
+- Test code is syntactically correct Python
+- Tests cover the main functionality of the code
+- Tests follow pytest best practices and naming conventions
+- Test structure is reasonable (arrange/act/assert pattern)
+
+DO NOT reject tests just because:
+- The execution environment is missing dependencies
+- External services are unavailable
+- The CI/CD pipeline hasn't been configured yet
+
+This is a proof-of-concept environment. Focus on CODE QUALITY, not execution results.
+
+Use read_local_file to review tests and write_local_file to make minor improvements.
 REMEMBER: All file paths must be within the cloned repository workspace path.""",
-        tools=FILE_TOOLS + PYTEST_TOOLS
+        tools=FILE_TOOLS + PYTEST_TOOLS,
+        default_options={'response_format': ReviewerOutput}
     )
