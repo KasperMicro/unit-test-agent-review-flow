@@ -42,7 +42,8 @@ def parse_args():
 
 async def run_orchestration(args):
     """Run the orchestration workflow"""
-    load_dotenv()
+    # Ensure .env values override any pre-existing AZURE_* vars in WSL
+    load_dotenv(override=True)
     
     # Get branch from args or environment
     target_branch = args.branch or os.getenv("AZURE_DEVOPS_DEFAULT_BRANCH", "main")
