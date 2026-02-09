@@ -2,6 +2,7 @@ from collections.abc import AsyncIterable
 from typing import Any
 import sys
 import subprocess
+import toml
 from dotenv import load_dotenv
 load_dotenv()
 import os
@@ -19,10 +20,33 @@ from agent_framework import (
 )
 
 class CodexAgent(BaseAgent):
-    """A simple custom agent that echoes user messages with a prefix.
+    """Agent that wraps the Codex CLI as a subprocess behind the Agent Framework interface.
 
-    This demonstrates how to create a fully custom agent by extending BaseAgent
-    and implementing the required run() and run_stream() methods.
+    This agent translates incoming chat messages into Codex CLI invocations,
+    writing the prompt to a temporary file (to avoid OS command-line length
+    limits) and executing ``codex exec`` in a sandboxed workspace-write mode.
+
+    Azure OpenAI configuration (API key and endpoint) is read from environment
+    variables and injected into the subprocess environment.  The agent also
+    patches the ``config.toml`` inside the project's ``.codex`` directory so
+    that ``base_url`` always reflects the current ``AZURE_OPENAI_ENDPOINT_CODEX``
+    value.
+
+    Args:
+        name: Human-readable name for the agent instance.
+        description: Short description of the agent's purpose.
+        scope_dir: Filesystem directory that Codex is allowed to read/write.
+            The CLI is invoked with ``-C <scope_dir>`` and the temporary prompt
+            file is created here.
+        **kwargs: Additional keyword arguments forwarded to ``BaseAgent``.
+
+    Example::
+
+        agent = CodexAgent(
+            name="ImplementAgent",
+            scope_dir="/path/to/working/dir",
+        )
+        response = await agent.run("Add unit tests for utils.py")
     """
 
     def __init__(
@@ -105,11 +129,8 @@ class CodexAgent(BaseAgent):
         prompt = "DONT ASK FOLLOWUP QUESTIONS. IMPLEMENT THE PLAN " + prompt
 
         # Run Codex agent and get the output
-        deployment_name = kwargs.get("deployment_name", "gpt-5.2-codex")
         output = self._run_codex_agent(
-            deployment_name=deployment_name,
             prompt=prompt,
-            scope_dir=self.scope_dir,
         )
 
         response_message = ChatMessage(role=Role.ASSISTANT, contents=[Content(type="text", text=output)])
@@ -123,22 +144,42 @@ class CodexAgent(BaseAgent):
     def _run_codex_agent(
         self,
         *,
-        deployment_name: str,
         prompt: str,
-        scope_dir: str = "CUsersalbinlnnfltOneDrive - MicrosoftCustomerTetra pakdevops-logging-agentcloned_code",
     ) -> str:
-        """
-        Run Codex CLI with Azure OpenAI configuration overridden per invocation.
-        Compatible with Codex CLI versions that do NOT support --provider / --model flags.
+        """Spawn the Codex CLI as a subprocess and return its captured output.
+
+        The method performs the following steps:
+
+        1. Loads Azure OpenAI credentials (``AZURE_OPENAI_API_KEY`` and
+           ``AZURE_OPENAI_ENDPOINT_CODEX``) from the environment.
+        2. Patches the project's ``.codex/config.toml`` so the ``azure``
+           provider's ``base_url`` matches the current endpoint.
+        3. Writes *prompt* to a temporary ``.md`` file inside ``self.scope_dir``
+           to sidestep Windows' ~8 191-character command-line limit.
+        4. Invokes ``codex exec --sandbox workspace-write -C <scope_dir>``
+           instructing Codex to read and then delete the temp file.
+        5. Streams ``stdout``/``stderr`` to the console while accumulating the
+           full output, and cleans up the temp file on exit.
+
+        Args:
+            prompt: The full instruction text to send to Codex.
 
         Returns:
-            The output from the Codex CLI as a string.
+            The combined stdout/stderr output produced by the Codex CLI.
+            If the process exits with a non-zero code, the output is prefixed
+            with a ``[Codex exited with code …]`` banner.
+
+        Raises:
+            RuntimeError: If ``AZURE_OPENAI_API_KEY`` or
+                ``AZURE_OPENAI_ENDPOINT_CODEX`` is not set.
         """
         # Load .env
         load_dotenv("../.env")
 
         azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT_CODEX")
+
+        print(azure_endpoint)
 
         if not azure_api_key:
             raise RuntimeError("AZURE_OPENAI_API_KEY is not set")
@@ -157,7 +198,23 @@ class CodexAgent(BaseAgent):
 
         # Ensure Azure env vars are in the subprocess environment
         env["AZURE_OPENAI_API_KEY"] = azure_api_key
-        env["AZURE_OPENAI_ENDPOINT_CODEX"] = azure_endpoint
+        env["AZURE_OPENAI_ENDPOINT"] = azure_endpoint
+
+        # Point CODEX_HOME to the .codex directory inside the agents folder
+        # so the CLI picks up the config.toml with the Azure provider definition.
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        codex_home = os.path.join(script_dir, '.codex')
+        env["CODEX_HOME"] = codex_home
+
+        # Patch base_url in config.toml from the AZURE_OPENAI_ENDPOINT_CODEX env var
+        # (Codex config doesn't support env var resolution for base_url natively)
+        config_path = os.path.join(codex_home, 'config.toml')
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config_data = toml.load(f)
+        if 'azure' in config_data.get('model_providers', {}):
+            config_data['model_providers']['azure']['base_url'] = azure_endpoint
+            with open(config_path, 'w', encoding='utf-8') as f:
+                toml.dump(config_data, f)
 
         # Write prompt to a temporary file to avoid Windows command-line length limits
         # (Windows has ~8191 char limit which can truncate long prompts passed as arguments)
@@ -167,7 +224,7 @@ class CodexAgent(BaseAgent):
             suffix='.md',
             delete=False,
             encoding='utf-8',
-            dir=scope_dir  # Create in scope dir so Codex can access it
+            dir=self.scope_dir  # Create in scope dir so Codex can access it
         )
         prompt_file.write(prompt)
         prompt_file.close()
@@ -178,24 +235,14 @@ class CodexAgent(BaseAgent):
         cmd = [
             codex_executable,
 
-            # ---- Per-command config overrides ----
-            "-c", "model_provider=azure",
-            "-c", f"model={deployment_name}",
-
-            "-c", f"model_providers.azure.base_url={azure_endpoint}",
-            "-c", "model_providers.azure.env_key=AZURE_OPENAI_API_KEY",
-            "-c", "model_providers.azure.wire_api=responses",
-
-            # ---- Subcommand ----
+            # ---- Subcommand (required for non-interactive/piped usage) ----
             "exec",
 
-            # ---- Enable file write access ----
-            # NOTE: On Windows, -s workspace-write and --full-auto may not work reliably
-            # due to WSL sandboxing constraints. Using bypass flag instead.
-            "--full-auto",
+            # ---- Sandbox: allow writes within the working directory ----
+            "--sandbox", "workspace-write",
 
             # ---- Scope file access to dummy_app directory ----
-            "-C", scope_dir,
+            "-C", self.scope_dir,
 
             # ---- Prompt: read instructions from file ----
             f"Read the instructions from the file '{prompt_file_name}' and execute them. Delete the file when done.",
@@ -249,13 +296,13 @@ def create_implementer_agent() -> ChatAgent:
     return CodexAgent(
         name="ImplementAgent",
         description="An agent that implements pytest tests based on the test plan and review feedback.",
-        scope_dir="CUsersalbinlnnfltOneDrive - MicrosoftCustomerTetra pakdevops-logging-agentcloned_code",
+        scope_dir="CUsersalbinlnnfltOneDrive - MicrosoftCustomerTetra pakdevops-logging-agentcloned_code", # Fix this
     )
 
 
 if __name__ == "__main__":
     # Example usage
     agent = create_implementer_agent()
-    response = asyncio.run(agent.run("Add a markdown file named 'greeting.md' with the text 'Hello world!' and commit the change with message 'Add greeting file'"))
+    response = asyncio.run(agent.run("Add a markdown file named 'greeting.md' with the text 'Hello world!'"))
     print("Agent response:")
     print(response)
