@@ -8,9 +8,6 @@
 venv/
 env/
 
-# Cloned repositories (runtime workspace)
-cloned_code/
-
 # Python
 __pycache__/
 *.py[cod]
