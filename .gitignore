@@ -33,3 +33,9 @@ Thumbs.db
 
 # Test files
 test_devops.py
+
+.codex/
+!agents/.codex/
+agents/.codex/*
+!agents/.codex/config.toml
+!agents/.codex/AGENTS.md

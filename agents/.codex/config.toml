@@ -1,0 +1,19 @@
+model = "gpt-5.2-codex"
+model_provider = "azure"
+sandbox = "workspace-write"
+personality = "pragmatic"
+
+[sandbox_workspace_write]
+writable_roots = []
+network_access = false
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+
+[model_providers.azure]
+name = "Azure"
+base_url = "https://<your-resource-name>.azure.com/openai"
+env_key = "AZURE_OPENAI_API_KEY"
+wire_api = "responses"
+
+[model_providers.azure.query_params]
+api-version = "2025-04-01-preview"
