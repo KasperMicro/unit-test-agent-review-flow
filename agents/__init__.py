@@ -8,7 +8,7 @@ from .agent_definitions import (
     create_reviewer_agent,
 )
 from .plugins import FILE_TOOLS, PYTEST_TOOLS
-from .quality_evaluation import VerifierOutput, ReviewerOutput
+from .models import VerifierOutput, ReviewerOutput
 
 __all__ = [
     'create_chat_client',

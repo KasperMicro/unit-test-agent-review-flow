@@ -7,7 +7,7 @@ from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import DefaultAzureCredential
 
 from .plugins import FILE_TOOLS, PYTEST_TOOLS
-from .quality_evaluation import VerifierOutput, ReviewerOutput
+from .models import VerifierOutput, ReviewerOutput
 
 
 def create_chat_client() -> AzureOpenAIChatClient:

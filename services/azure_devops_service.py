@@ -108,8 +108,9 @@ class AzureDevOpsService:
         
         # Clone the repository
         if os.path.exists(repo_path):
-            # Pull latest if already exists
+            # Pull latest if already exists - update remote URL with auth first
             local_repo = git.Repo(repo_path)
+            local_repo.remotes.origin.set_url(auth_url)
             local_repo.remotes.origin.pull(branch)
             print(f"Updated existing repository at {repo_path}")
         else:

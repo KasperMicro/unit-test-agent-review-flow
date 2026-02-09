@@ -1,5 +1,6 @@
 # Microsoft Agent Framework
 agent-framework-core==1.0.0b260128
+agent-framework-devui>=1.0.0b260128
 
 # Azure Identity (pinned for cryptography compatibility on ARM64)
 azure-identity>=1.15.0,<1.20

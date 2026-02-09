@@ -26,7 +26,7 @@ from agents import (
     create_implementer_agent,
     create_reviewer_agent,
 )
-from agents.quality_evaluation import VerifierOutput, ReviewerOutput
+from agents.models import VerifierOutput, ReviewerOutput
 from services.azure_devops_service import create_devops_service_from_env
 
 
@@ -77,7 +77,7 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
     results = run_kwargs.get("results", {"steps": []})
     
     # Get structured output directly from agent response (guaranteed by response_format)
-    verifier_output: VerifierOutput = response.agent_response.value
+    verifier_output: VerifierOutput = response.agent_response.value                             # Decision by verifier in structured form
     
     if verifier_output is None:
         # Fallback if response parsing somehow failed
@@ -90,7 +90,7 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
             "decision": "tests_needed",
             "error": "structured_output_missing"
         })
-        await ctx.send_message(VerifierDecision.TESTS_NEEDED)
+        await ctx.send_message(VerifierDecision.TESTS_NEEDED)                                   # Test needed routing in orchestration
         return
     
     # Show structured decision
@@ -111,7 +111,7 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
             "decision": "tests_correct",
             "feedback": verifier_output.feedback
         })
-        await ctx.send_message(VerifierDecision.TESTS_CORRECT)
+        await ctx.send_message(VerifierDecision.TESTS_CORRECT)                                  # Tests correct routing in orchestration
     else:
         print(f"\n➡️  Routing: TESTS_NEEDED → Planner Agent")
         results["steps"].append({
@@ -120,7 +120,7 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
             "decision": "tests_needed",
             "feedback": verifier_output.feedback
         })
-        await ctx.send_message(VerifierDecision.TESTS_NEEDED)
+        await ctx.send_message(VerifierDecision.TESTS_NEEDED)                                   # Test needed routing in orchestration
 
 
 async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: WorkflowContext[ReviewerDecision]) -> None:
@@ -156,7 +156,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
         print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
     # Get structured output directly from agent response (guaranteed by response_format)
-    reviewer_output: ReviewerOutput = response.agent_response.value
+    reviewer_output: ReviewerOutput = response.agent_response.value                            # Decision by reviewer in structured form
     
     if reviewer_output is None:
         # Fallback if response parsing somehow failed
@@ -173,7 +173,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
                 "revision": revision_count + 1,
                 "error": "structured_output_missing"
             })
-            await ctx.send_message(ReviewerDecision.APPROVED)
+            await ctx.send_message(ReviewerDecision.APPROVED)                                  # Review approved routing in orchestration
         else:
             print("   🔄 Forcing revision.")
             await ctx.set_shared_state("revision_count", revision_count + 1)
@@ -185,7 +185,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
                 "revision": revision_count + 1,
                 "error": "structured_output_missing"
             })
-            await ctx.send_message(ReviewerDecision.REVISE)
+            await ctx.send_message(ReviewerDecision.REVISE)                                     # Review revise routing in orchestration
         return
     
     print(f"\n📊 Structured Decision:")
@@ -213,7 +213,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
             "revision": revision_count + 1,
             "feedback": reviewer_output.feedback
         })
-        await ctx.send_message(ReviewerDecision.APPROVED)
+        await ctx.send_message(ReviewerDecision.APPROVED)                                        # Review approved routing in orchestration
     else:
         print(f"\n➡️  Routing: REVISE → Planner Agent (revision #{revision_count + 2})")
         print(f"      Feedback: {reviewer_output.feedback[:150]}...")
@@ -226,7 +226,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
             "revision": revision_count + 1,
             "feedback": reviewer_output.feedback
         })
-        await ctx.send_message(ReviewerDecision.REVISE)
+        await ctx.send_message(ReviewerDecision.REVISE)                                          # Review revise routing in orchestration
 
 
 #-----------------------------Creating Pull Request-----------------------------#
