@@ -296,7 +296,7 @@ def create_implementer_agent() -> ChatAgent:
     return CodexAgent(
         name="ImplementAgent",
         description="An agent that implements pytest tests based on the test plan and review feedback.",
-        scope_dir="CUsersalbinlnnfltOneDrive - MicrosoftCustomerTetra pakdevops-logging-agentcloned_code", # Fix this
+        scope_dir="", # Fix this
     )
 
 
