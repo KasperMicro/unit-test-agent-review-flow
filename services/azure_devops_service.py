@@ -108,11 +108,18 @@ class AzureDevOpsService:
         
         # Clone the repository
         if os.path.exists(repo_path):
-            # Pull latest if already exists - update remote URL with auth first
-            local_repo = git.Repo(repo_path)
-            local_repo.remotes.origin.set_url(auth_url)
-            local_repo.remotes.origin.pull(branch)
-            print(f"Updated existing repository at {repo_path}")
+            try:
+                # Pull latest if already exists - update remote URL with auth first
+                local_repo = git.Repo(repo_path)
+                local_repo.remotes.origin.set_url(auth_url)
+                local_repo.remotes.origin.pull(branch)
+                print(f"Updated existing repository at {repo_path}")
+            except git.exc.InvalidGitRepositoryError:
+                # Directory exists but is not a valid git repo — remove and re-clone
+                import shutil
+                shutil.rmtree(repo_path)
+                git.Repo.clone_from(auth_url, repo_path, branch=branch)
+                print(f"Replaced invalid directory and cloned repository to {repo_path}")
         else:
             git.Repo.clone_from(auth_url, repo_path, branch=branch)
             print(f"Cloned repository to {repo_path}")
