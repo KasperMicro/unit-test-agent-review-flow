@@ -243,10 +243,14 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
     
     # Get run kwargs from shared state
     run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
-    repo_path = run_kwargs.get("repo_path")
+    repo_path_relative = run_kwargs.get("repo_path")
     config = run_kwargs.get("config")
     devops_service = run_kwargs.get("devops_service")
     results = run_kwargs.get("results", {"steps": []})
+    
+    # Resolve relative repo path to absolute for git operations
+    workspace = os.environ.get("WORKSPACE_PATH", "./cloned_code")
+    repo_path = os.path.abspath(os.path.join(workspace, repo_path_relative))
     
     # Check for changes BEFORE creating branch
     repo = git.Repo(repo_path)
@@ -585,6 +589,8 @@ class UnitTestOrchestration:
         # Build repo path (resolve to absolute)
         repo_name = os.getenv("AZURE_DEVOPS_REPO_NAME", "")
         self._repo_path = os.path.abspath(os.path.join(self.config.workspace_path, repo_name))
+        # Relative path for agent messages (avoids leaking absolute paths)
+        self._repo_relative = repo_name
         
         # Create agents
         verifier_agent = create_verifier_agent()
@@ -674,9 +680,10 @@ class UnitTestOrchestration:
             results["steps"].append({"step": "clone", "success": True})
             print(f"   Cloned to: {self._repo_path}")
             
-            # Set WORKSPACE_PATH so agent plugins can enforce path restrictions
-            os.environ["WORKSPACE_PATH"] = self._repo_path
-            print(f"   🔒 Agents restricted to workspace: {self._repo_path}")
+            # Set WORKSPACE_PATH so agent plugins can resolve relative paths
+            workspace_abs = os.path.abspath(self.config.workspace_path)
+            os.environ["WORKSPACE_PATH"] = workspace_abs
+            print(f"   🔒 Agents restricted to workspace: {workspace_abs}")
             
             # Step 2: Run the agent workflow
             print("\n" + "="*70)
@@ -689,7 +696,7 @@ class UnitTestOrchestration:
             print("="*70)
             
             # Create initial message for verifier (uses structured output)
-            initial_message = f"""Analyze the code in {self._repo_path} and check if proper pytest unit tests exist.
+            initial_message = f"""Analyze the code in {self._repo_relative} and check if proper pytest unit tests exist.
 
 Look for:
 - Key functions and classes in the source code
@@ -714,7 +721,7 @@ Your structured output will determine the next steps in the workflow."""
             # These will be stored in SharedState under "_workflow_run_kwargs"
             workflow_result = await self.workflow.run(
                 initial_message,
-                repo_path=self._repo_path,
+                repo_path=self._repo_relative,
                 config=self.config,
                 devops_service=self.devops_service,
                 results=results,

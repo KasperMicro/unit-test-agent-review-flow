@@ -1,8 +1,11 @@
 """
 Agent Tools - Functions that agents can use for file operations and pytest.
 
-IMPORTANT: All file operations are restricted to the workspace path (cloned code)
+All file operations are restricted to the workspace path (cloned code)
 to prevent agents from modifying the orchestration code itself.
+
+Tools accept relative paths (e.g. "dummy-repo/app.py") which are resolved
+against the workspace root internally.
 """
 import os
 import sys
@@ -18,77 +21,126 @@ def _get_allowed_workspace() -> Path:
     return Path(workspace).resolve()
 
 
+def _sanitize_output(text: str) -> str:
+    """Strip the absolute workspace prefix from tool output.
+    
+    Prevents agents from seeing (and attempting to use) absolute paths
+    in pytest output, error messages, or file listings.
+    Handles both forward-slash and backslash variants.
+    """
+    workspace = str(_get_allowed_workspace())
+    # Replace both slash styles (Windows paths may appear either way)
+    for prefix in (workspace + os.sep, workspace + "/", workspace + "\\", workspace):
+        if prefix in text:
+            text = text.replace(prefix, "")
+    return text
+
+
+def _resolve_relative_path(relative_path: str) -> Path:
+    """Resolve a relative path against the workspace root.
+    
+    Only accepts relative paths like:
+      - "dummy-repo/app.py"
+      - "dummy-repo/tests/"
+    
+    Absolute paths are rejected by _validate_and_resolve.
+    """
+    return (_get_allowed_workspace() / relative_path).resolve()
+
+
 def _is_path_allowed(file_path: str) -> bool:
     """Check if a path is within the allowed workspace."""
     try:
-        resolved = Path(file_path).resolve()
+        resolved = _resolve_relative_path(file_path)
         workspace = _get_allowed_workspace()
         return str(resolved).startswith(str(workspace))
     except Exception:
         return False
 
 
-def _validate_path(file_path: str, operation: str) -> str | None:
-    """Validate a path and return error message if not allowed."""
-    if not _is_path_allowed(file_path):
-        workspace = _get_allowed_workspace()
-        return f"Error: {operation} is only allowed within the cloned code workspace: {workspace}. Path '{file_path}' is not allowed."
-    return None
+def _validate_and_resolve(file_path: str, operation: str) -> tuple[Path | None, str | None]:
+    """Validate a path and return (resolved_path, error_message).
+    
+    Returns the resolved absolute path if valid, or an error message if not.
+    Rejects absolute paths and directory traversal attempts.
+    """
+    # Reject absolute paths (e.g. C:\Users\... or /mnt/data)
+    if Path(file_path).is_absolute():
+        print(f"[SECURITY] Rejected absolute path in {operation}: {file_path}")
+        return None, f"Error: Absolute paths are not allowed. Use a relative path like 'dummy-repo/app.py'."
+    
+    # Reject directory traversal
+    if '..' in file_path:
+        print(f"[SECURITY] Rejected path traversal in {operation}: {file_path}")
+        return None, f"Error: Path traversal ('..') is not allowed. Use a relative path like 'dummy-repo/app.py'."
+    
+    resolved = _resolve_relative_path(file_path)
+    workspace = _get_allowed_workspace()
+    if not str(resolved).startswith(str(workspace)):
+        return None, f"Error: {operation} is only allowed within the workspace. Use a relative path like 'dummy-repo/app.py'."
+    return resolved, None
 
 
 #--------------------------------File Tools--------------------------------#
 def read_local_file(
-    file_path: Annotated[str, Field(description="Full path to the local file within the cloned code workspace")]
+    file_path: Annotated[str, Field(description="Relative path to the file within the workspace, e.g. 'dummy-repo/app.py'")]
 ) -> str:
-    """Read a file from the cloned code workspace. Only files within the workspace path are accessible."""
-    error = _validate_path(file_path, "Reading files")
+    """Read a file from the workspace. Use relative paths like 'dummy-repo/app.py'."""
+    resolved, error = _validate_and_resolve(file_path, "Reading files")
     if error:
         return error
     
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        with open(resolved, 'r', encoding='utf-8') as f:
+            return _sanitize_output(f.read())
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return _sanitize_output(f"Error reading file: {str(e)}")
 
 
 def write_local_file(
-    file_path: Annotated[str, Field(description="Full path to the local file within the cloned code workspace")],
+    file_path: Annotated[str, Field(description="Relative path to the file within the workspace, e.g. 'dummy-repo/tests/test_app.py'")],
     content: Annotated[str, Field(description="Content to write")]
 ) -> str:
-    """Write content to a local file within the cloned code workspace. Cannot write outside workspace."""
-    error = _validate_path(file_path, "Writing files")
+    """Write content to a file in the workspace. Use relative paths like 'dummy-repo/tests/test_app.py'."""
+    resolved, error = _validate_and_resolve(file_path, "Writing files")
     if error:
         return error
     
     try:
-        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, 'w', encoding='utf-8') as f:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved, 'w', encoding='utf-8') as f:
             f.write(content)
         return f"Successfully wrote to: {file_path}"
     except Exception as e:
-        return f"Error writing file: {str(e)}"
+        return _sanitize_output(f"Error writing file: {str(e)}")
 
 
 def list_local_files(
-    directory: Annotated[str, Field(description="Directory path within the cloned code workspace")],
+    directory: Annotated[str, Field(description="Relative directory path within the workspace, e.g. 'dummy-repo' or 'dummy-repo/tests'")],
     pattern: Annotated[str, Field(description="File pattern (e.g., '*.py')")] = "*"
 ) -> str:
-    """List files in a directory within the cloned code workspace. Only workspace directories are accessible."""
-    error = _validate_path(directory, "Listing files")
+    """List files in a directory within the workspace. Use relative paths like 'dummy-repo'."""
+    resolved, error = _validate_and_resolve(directory, "Listing files")
     if error:
         return error
     
     try:
-        path = Path(directory)
-        files = list(path.rglob(pattern))
+        workspace = _get_allowed_workspace()
+        files = list(resolved.rglob(pattern))
         # Filter out common non-code directories
         files = [f for f in files if not any(
             skip in str(f) for skip in ['.git', '__pycache__', 'node_modules', '.venv', '.pytest_cache']
         )]
-        return "\n".join(str(f) for f in files[:100])
+        # Return paths relative to workspace for cleaner output
+        relative_files = []
+        for f in files[:100]:
+            try:
+                relative_files.append(str(f.relative_to(workspace)))
+            except ValueError:
+                relative_files.append(str(f))
+        return "\n".join(relative_files)
     except Exception as e:
-        return f"Error listing files: {str(e)}"
+        return _sanitize_output(f"Error listing files: {str(e)}")
 
 
 #--------------------------------Pytest Tools--------------------------------#
@@ -123,11 +175,11 @@ def _ensure_pytest_installed() -> str | None:
 
 
 def run_pytest(
-    test_path: Annotated[str, Field(description="Path to test file or directory within the cloned code workspace")],
+    test_path: Annotated[str, Field(description="Relative path to test file or directory, e.g. 'dummy-repo/tests' or 'dummy-repo/tests/test_app.py'")],
     verbose: Annotated[bool, Field(description="Enable verbose output")] = True
 ) -> str:
-    """Run pytest on specified path within the cloned code workspace."""
-    error = _validate_path(test_path, "Running pytest")
+    """Run pytest on specified path within the workspace. Use relative paths."""
+    resolved, error = _validate_and_resolve(test_path, "Running pytest")
     if error:
         return error
     
@@ -137,8 +189,7 @@ def run_pytest(
         return install_error
     
     try:
-        # Use sys.executable to ensure we use the same Python environment
-        cmd = [sys.executable, "-m", "pytest", test_path]
+        cmd = [sys.executable, "-m", "pytest", str(resolved)]
         if verbose:
             cmd.append("-v")
         
@@ -147,7 +198,7 @@ def run_pytest(
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+            cwd=str(resolved.parent) if resolved.is_file() else str(resolved)
         )
         
         output = result.stdout
@@ -155,22 +206,22 @@ def run_pytest(
             output += f"\n\nSTDERR:\n{result.stderr}"
         
         status = "PASSED" if result.returncode == 0 else "FAILED"
-        return f"Pytest {status} (exit code: {result.returncode})\n\n{output}"
+        return _sanitize_output(f"Pytest {status} (exit code: {result.returncode})\n\n{output}")
     except subprocess.TimeoutExpired:
         return "Error: Pytest timed out after 120 seconds"
     except Exception as e:
-        return f"Error running pytest: {str(e)}"
+        return _sanitize_output(f"Error running pytest: {str(e)}")
 
 
 def run_pytest_with_coverage(
-    test_path: Annotated[str, Field(description="Path to test file or directory within the cloned code workspace")],
-    source_path: Annotated[str, Field(description="Path to source code within the cloned workspace to measure coverage for")]
+    test_path: Annotated[str, Field(description="Relative path to test file or directory, e.g. 'dummy-repo/tests'")],
+    source_path: Annotated[str, Field(description="Relative path to source code to measure coverage for, e.g. 'dummy-repo/app.py'")]
 ) -> str:
-    """Run pytest with coverage report. Both paths must be within the cloned code workspace."""
-    error = _validate_path(test_path, "Running pytest")
+    """Run pytest with coverage report. Use relative paths for both arguments."""
+    resolved_test, error = _validate_and_resolve(test_path, "Running pytest")
     if error:
         return error
-    error = _validate_path(source_path, "Measuring coverage")
+    resolved_source, error = _validate_and_resolve(source_path, "Measuring coverage")
     if error:
         return error
     
@@ -182,8 +233,8 @@ def run_pytest_with_coverage(
     try:
         cmd = [
             sys.executable, "-m", "pytest",
-            test_path,
-            f"--cov={source_path}",
+            str(resolved_test),
+            f"--cov={resolved_source}",
             "--cov-report=term-missing",
             "-v"
         ]
@@ -193,18 +244,18 @@ def run_pytest_with_coverage(
             capture_output=True,
             text=True,
             timeout=180,
-            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+            cwd=str(resolved_test.parent) if resolved_test.is_file() else str(resolved_test)
         )
         
         output = result.stdout
         if result.stderr:
             output += f"\n\nSTDERR:\n{result.stderr}"
         
-        return f"Coverage Report:\n{output}"
+        return _sanitize_output(f"Coverage Report:\n{output}")
     except subprocess.TimeoutExpired:
         return "Error: Pytest with coverage timed out after 180 seconds"
     except Exception as e:
-        return f"Error running pytest with coverage: {str(e)}"
+        return _sanitize_output(f"Error running pytest with coverage: {str(e)}")
 
 #--------------------------------Testing Standards--------------------------------#
 def get_testing_standards() -> str:
