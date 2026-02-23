@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 
+# Maximum file size an agent can write (10 MB)
+_MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+# Minimal env keys passed to pytest subprocesses – strips secrets like PATs.
+_SAFE_ENV_KEYS = {"PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USER", "LANG", "PATHEXT"}
+
+
+def _build_safe_env() -> dict[str, str]:
+    """Build a minimal environment dict, stripping secrets & credentials."""
+    return {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
 #--------------------------------Path Validation--------------------------------#
 
 # Hidden / sensitive file patterns that agents must never access
@@ -42,7 +53,9 @@ def _is_path_allowed(file_path: str) -> bool:
     try:
         resolved = Path(file_path).resolve()
         workspace = _get_allowed_workspace()
-        return str(resolved).startswith(str(workspace))
+        # Use proper path containment check (not str.startswith which is
+        # vulnerable to prefix collisions like /workspace vs /workspace-evil)
+        return resolved == workspace or workspace in resolved.parents
     except Exception:
         return False
 
@@ -119,6 +132,8 @@ def write_local_file(
         return error
     
     try:
+        if len(content.encode('utf-8')) > _MAX_WRITE_BYTES:
+            return f"Error: content exceeds maximum allowed size ({_MAX_WRITE_BYTES // (1024*1024)} MB)"
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -204,7 +219,8 @@ def run_pytest(
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path,
+            env=_build_safe_env()
         )
         
         output = result.stdout
@@ -250,7 +266,8 @@ def run_pytest_with_coverage(
             capture_output=True,
             text=True,
             timeout=180,
-            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path
+            cwd=Path(test_path).parent if Path(test_path).is_file() else test_path,
+            env=_build_safe_env()
         )
         
         output = result.stdout
