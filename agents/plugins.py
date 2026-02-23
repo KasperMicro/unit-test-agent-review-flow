@@ -23,7 +23,7 @@ _SENSITIVE_FILE_NAMES = {
 }
 
 _SENSITIVE_DIR_NAMES = {
-    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
+    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".git",
 }
 
 _SENSITIVE_EXTENSIONS = {
