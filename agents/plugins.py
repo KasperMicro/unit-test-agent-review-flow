@@ -14,7 +14,37 @@ from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 
+# Maximum file size an agent can write (10 MB)
+_MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+# Minimal env keys passed to pytest subprocesses – strips secrets like PATs.
+_SAFE_ENV_KEYS = {"PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USER", "LANG", "PATHEXT"}
+
+
+def _build_safe_env() -> dict[str, str]:
+    """Build a minimal environment dict, stripping secrets & credentials."""
+    return {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
 #--------------------------------Path Validation--------------------------------#
+
+# Hidden / sensitive file patterns that agents must never access
+_SENSITIVE_FILE_NAMES = {
+    ".env", ".env.local", ".env.development", ".env.production", ".env.staging",
+    ".env.test", ".env.example",
+    "credentials", ".credentials", "credentials.json", "credentials.yaml",
+    ".netrc", ".npmrc", ".pypirc", ".htpasswd", ".pgpass",
+    ".gitconfig", ".git-credentials",
+}
+
+_SENSITIVE_DIR_NAMES = {
+    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".git",
+}
+
+_SENSITIVE_EXTENSIONS = {
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore",
+}
+
+
 def _get_allowed_workspace() -> Path:
     """Get the allowed workspace path from environment."""
     workspace = os.getenv("WORKSPACE_PATH", "./cloned_code")
@@ -53,16 +83,54 @@ def _is_path_allowed(file_path: str) -> bool:
     try:
         resolved = _resolve_relative_path(file_path)
         workspace = _get_allowed_workspace()
-        return str(resolved).startswith(str(workspace))
+        # Use proper path containment check (not str.startswith which is
+        # vulnerable to prefix collisions like /workspace vs /workspace-evil)
+        return resolved == workspace or workspace in resolved.parents
     except Exception:
         return False
+
+
+def _is_sensitive_path(file_path: str) -> bool:
+    """Check if a path references a hidden or sensitive file/directory.
+    
+    Blocks access to:
+    - .env files (all variants)
+    - .ssh, .aws, .kube, .docker, .gnupg directories
+    - Credential/key files (.pem, .key, credentials, etc.)
+    """
+    try:
+        p = Path(file_path).resolve()
+        name_lower = p.name.lower()
+        suffix_lower = p.suffix.lower()
+
+        # Check if the file name itself is sensitive
+        if name_lower in _SENSITIVE_FILE_NAMES:
+            return True
+
+        # Catch .env* variants not in the explicit set (e.g. .env.custom)
+        if name_lower.startswith(".env"):
+            return True
+
+        # Check file extension
+        if suffix_lower in _SENSITIVE_EXTENSIONS:
+            return True
+
+        # Check if any parent directory is a sensitive directory
+        for part in p.parts:
+            if part.lower() in _SENSITIVE_DIR_NAMES:
+                return True
+
+        return False
+    except Exception:
+        # If we cannot determine safety, deny access
+        return True
 
 
 def _validate_and_resolve(file_path: str, operation: str) -> tuple[Path | None, str | None]:
     """Validate a path and return (resolved_path, error_message).
     
     Returns the resolved absolute path if valid, or an error message if not.
-    Rejects absolute paths and directory traversal attempts.
+    Rejects absolute paths, directory traversal attempts, and sensitive files.
     """
     # Reject absolute paths (e.g. C:\Users\... or /mnt/data)
     if Path(file_path).is_absolute():
@@ -73,6 +141,11 @@ def _validate_and_resolve(file_path: str, operation: str) -> tuple[Path | None, 
     if '..' in file_path:
         print(f"[SECURITY] Rejected path traversal in {operation}: {file_path}")
         return None, f"Error: Path traversal ('..') is not allowed. Use a relative path like 'dummy-repo/app.py'."
+    
+    # Check for sensitive files
+    if _is_sensitive_path(file_path):
+        print(f"[SECURITY] Rejected sensitive path in {operation}: {file_path}")
+        return None, f"Error: {operation} blocked — access to hidden or sensitive files is not permitted."
     
     resolved = _resolve_relative_path(file_path)
     workspace = _get_allowed_workspace()
@@ -107,6 +180,8 @@ def write_local_file(
         return error
     
     try:
+        if len(content.encode('utf-8')) > _MAX_WRITE_BYTES:
+            return f"Error: content exceeds maximum allowed size ({_MAX_WRITE_BYTES // (1024*1024)} MB)"
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with open(resolved, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -127,10 +202,10 @@ def list_local_files(
     try:
         workspace = _get_allowed_workspace()
         files = list(resolved.rglob(pattern))
-        # Filter out common non-code directories
+        # Filter out common non-code directories and sensitive files
         files = [f for f in files if not any(
             skip in str(f) for skip in ['.git', '__pycache__', 'node_modules', '.venv', '.pytest_cache']
-        )]
+        ) and not _is_sensitive_path(str(f))]
         # Return paths relative to workspace for cleaner output
         relative_files = []
         for f in files[:100]:
@@ -198,7 +273,8 @@ def run_pytest(
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=str(resolved.parent) if resolved.is_file() else str(resolved)
+            cwd=str(resolved.parent) if resolved.is_file() else str(resolved),
+            env=_build_safe_env()
         )
         
         output = result.stdout
@@ -244,7 +320,8 @@ def run_pytest_with_coverage(
             capture_output=True,
             text=True,
             timeout=180,
-            cwd=str(resolved_test.parent) if resolved_test.is_file() else str(resolved_test)
+            cwd=str(resolved_test.parent) if resolved_test.is_file() else str(resolved_test),
+            env=_build_safe_env()
         )
         
         output = result.stdout
