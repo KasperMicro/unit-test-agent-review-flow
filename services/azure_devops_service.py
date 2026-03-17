@@ -122,12 +122,44 @@ class AzureDevOpsService:
                 local_repo.remotes.origin.set_url(clone_url)
                 print(f"Updated existing repository at {repo_path}")
             except git.exc.InvalidGitRepositoryError:
-                # Directory exists but is not a valid git repo — remove and re-clone
+                # Directory exists but is not a valid git repo — try to remove, else init in-place
                 import shutil
-                shutil.rmtree(repo_path)
-                cloned = git.Repo.clone_from(auth_url, repo_path, branch=branch)
-                cloned.remotes.origin.set_url(clone_url)
-                print(f"Replaced invalid directory and cloned repository to {repo_path}")
+                import stat
+                import time
+
+                def _force_remove(func, path, exc_info):
+                    """Handle read-only files on Windows."""
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+
+                removed = False
+                for attempt in range(3):
+                    try:
+                        shutil.rmtree(repo_path, onexc=_force_remove)
+                        removed = True
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(1)
+
+                if removed:
+                    cloned = git.Repo.clone_from(auth_url, repo_path, branch=branch)
+                    cloned.remotes.origin.set_url(clone_url)
+                    print(f"Replaced invalid directory and cloned repository to {repo_path}")
+                else:
+                    # Directory is locked (e.g. VS Code watcher) — init fresh repo in-place
+                    print(f"Directory locked, initializing git repo in-place at {repo_path}")
+                    local_repo = git.Repo.init(repo_path)
+                    try:
+                        local_repo.create_remote('origin', auth_url)
+                    except git.GitCommandError:
+                        local_repo.remotes.origin.set_url(auth_url)
+                    with local_repo.config_writer() as cw:
+                        cw.set_value("credential", "helper", "")
+                    local_repo.remotes.origin.fetch()
+                    local_repo.git.checkout(f"origin/{branch}", b=branch, force=True)
+                    local_repo.remotes.origin.set_url(clone_url)
+                    print(f"Initialized and checked out {branch} at {repo_path}")
         else:
             cloned = git.Repo.clone_from(auth_url, repo_path, branch=branch)
             # Remove PAT from persisted remote URL

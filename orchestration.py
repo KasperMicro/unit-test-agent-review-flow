@@ -3,6 +3,7 @@ Unit Test Orchestration - Coordinates multi-agent workflow for pytest test gener
 using the declarative WorkflowBuilder pattern.
 """
 import os
+import re as _re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from datetime import datetime
@@ -25,9 +26,7 @@ from agents import (
     create_planner_agent,
     create_implementer_agent,
     create_reviewer_agent,
-    create_copilot_sdk_implementer,
 )
-from agents.models import VerifierOutput, ReviewerOutput
 from services.azure_devops_service import create_devops_service_from_env
 
 
@@ -51,94 +50,87 @@ class OrchestrationConfig:
     feature_branch_prefix: str = "feature/add-tests-"
     pr_labels: list = field(default_factory=lambda: ["auto-generated", "unit-tests"])
     max_revision_iterations: int = 3
-    use_copilot_sdk: bool = False  # Use Copilot SDK for the implementer agent
+
+
+def _parse_decision(text: str) -> bool | None:
+    """Extract a DECISION: PASS/FAIL marker from agent text output.
+
+    Searches for the last occurrence of 'DECISION: PASS' or 'DECISION: FAIL'
+    in the text (case-insensitive). Returns True for PASS, False for FAIL,
+    or None if no marker is found.
+    """
+    if not text:
+        return None
+    # Find the last DECISION marker in the text
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().upper()
+        if stripped == "DECISION: PASS":
+            return True
+        if stripped == "DECISION: FAIL":
+            return False
+    return None
 
 
 async def _route_verifier_decision(response: AgentExecutorResponse, ctx: WorkflowContext[VerifierDecision]) -> None:
-    """Route based on verifier agent's structured output decision.
-    
-    The agent uses response_format=VerifierOutput, so response.agent_response.value
-    contains the parsed Pydantic model directly.
-    
-    Args:
-        response: AgentExecutorResponse from verifier agent
-        ctx: Workflow context with shared state
-    """
+    """Route based on verifier agent's DECISION: PASS/FAIL output."""
     print(f"\n" + "="*70)
     print(f"🔍 VERIFIER AGENT - Analysis Complete")
     print("="*70)
     
-    # Show agent's raw text output (truncated)
     text = response.agent_response.text or ""
     if text:
         print(f"\n📤 Agent Output (truncated):")
         print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
-    # Get run kwargs from shared state
     run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     results = run_kwargs.get("results", {"steps": []})
     
-    # Get structured output directly from agent response (guaranteed by response_format)
-    verifier_output: VerifierOutput = response.agent_response.value                             # Decision by verifier in structured form
+    decision = _parse_decision(text)
     
-    if verifier_output is None:
-        # Fallback if response parsing somehow failed
-        print("\n❌ Could not parse verifier response. Defaulting to tests needed.")
+    if decision is None:
+        print("\n❌ Could not find DECISION marker in verifier response. Defaulting to FAIL (tests needed).")
         ctx.set_state("verifier_report", text[:500])
         ctx.set_state("verifier_feedback", text)
         results["steps"].append({
             "step": "verify", 
             "success": False,
             "decision": "tests_needed",
-            "error": "structured_output_missing"
+            "error": "decision_marker_missing"
         })
-        await ctx.send_message(VerifierDecision.TESTS_NEEDED)                                   # Test needed routing in orchestration
+        await ctx.send_message(VerifierDecision.TESTS_NEEDED)
         return
     
-    # Show structured decision
-    print(f"\n📊 Structured Decision:")
-    print(f"   tests_exist_and_correct = {verifier_output.tests_exist_and_correct}")
-    print(f"\n💬 Feedback:")
-    print(f"   {verifier_output.feedback}")
+    # Store feedback (everything before the decision line)
+    feedback = text.strip()
+    ctx.set_state("verifier_report", feedback)
+    ctx.set_state("verifier_feedback", feedback)
     
-    # Store feedback for downstream agents
-    ctx.set_state("verifier_report", verifier_output.feedback)
-    ctx.set_state("verifier_feedback", verifier_output.feedback)
-    
-    if verifier_output.tests_exist_and_correct:
+    if decision:
+        print(f"\n📊 Decision: PASS — tests exist and are correct")
         print(f"\n➡️  Routing: TESTS_CORRECT → Workflow Complete (no changes needed)")
         results["steps"].append({
             "step": "verify", 
             "success": True,
             "decision": "tests_correct",
-            "feedback": verifier_output.feedback
+            "feedback": feedback[:500]
         })
-        await ctx.send_message(VerifierDecision.TESTS_CORRECT)                                  # Tests correct routing in orchestration
+        await ctx.send_message(VerifierDecision.TESTS_CORRECT)
     else:
+        print(f"\n📊 Decision: FAIL — tests needed")
         print(f"\n➡️  Routing: TESTS_NEEDED → Planner Agent")
         results["steps"].append({
             "step": "verify", 
             "success": True,
             "decision": "tests_needed",
-            "feedback": verifier_output.feedback
+            "feedback": feedback[:500]
         })
-        await ctx.send_message(VerifierDecision.TESTS_NEEDED)                                   # Test needed routing in orchestration
+        await ctx.send_message(VerifierDecision.TESTS_NEEDED)
 
 
 async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: WorkflowContext[ReviewerDecision]) -> None:
-    """Route based on reviewer agent's structured output decision.
-    
-    The agent uses response_format=ReviewerOutput, so response.agent_response.value
-    contains the parsed Pydantic model directly.
-    
-    Args:
-        response: AgentExecutorResponse from reviewer agent
-        ctx: Workflow context with shared state
-    """
-    # Get run kwargs from shared state
+    """Route based on reviewer agent's DECISION: PASS/FAIL output."""
     run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     
-    # Get revision_count (may not exist yet)
     try:
         revision_count = ctx.get_state("revision_count")
         if revision_count is None:
@@ -153,19 +145,16 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
     print(f"🔎 REVIEWER AGENT - Review Complete (Revision #{revision_count + 1})")
     print("="*70)
     
-    # Show agent's raw text output (truncated)
     text = response.agent_response.text or ""
     if text:
         print(f"\n📤 Agent Output (truncated):")
         print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
-    # Get structured output directly from agent response (guaranteed by response_format)
-    reviewer_output: ReviewerOutput = response.agent_response.value                            # Decision by reviewer in structured form
+    decision = _parse_decision(text)
+    feedback = text.strip()
     
-    if reviewer_output is None:
-        # Fallback if response parsing somehow failed
-        print("\n❌ Could not parse reviewer response!")
-        text = response.agent_response.text or ""
+    if decision is None:
+        print("\n❌ Could not find DECISION marker in reviewer response!")
         
         if revision_count >= max_revisions:
             print(f"   ⚠️ Max revisions reached. Forcing PR.")
@@ -175,33 +164,25 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
                 "success": False,
                 "decision": "approved",
                 "revision": revision_count + 1,
-                "error": "structured_output_missing"
+                "error": "decision_marker_missing"
             })
-            await ctx.send_message(ReviewerDecision.APPROVED)                                  # Review approved routing in orchestration
+            await ctx.send_message(ReviewerDecision.APPROVED)
         else:
             print("   🔄 Forcing revision.")
             ctx.set_state("revision_count", revision_count + 1)
-            ctx.set_state("review_feedback", text[:500])
+            ctx.set_state("review_feedback", feedback[:500])
             results["steps"].append({
                 "step": "review", 
                 "success": False,
                 "decision": "revise",
                 "revision": revision_count + 1,
-                "error": "structured_output_missing"
+                "error": "decision_marker_missing"
             })
-            await ctx.send_message(ReviewerDecision.REVISE)                                     # Review revise routing in orchestration
+            await ctx.send_message(ReviewerDecision.REVISE)
         return
     
-    print(f"\n📊 Structured Decision:")
-    print(f"   approved = {reviewer_output.approved}")
-    print(f"\n💬 Feedback:")
-    print(f"   {reviewer_output.feedback}")
-    
-    # Store feedback for downstream agents
-    ctx.set_state("review_summary", reviewer_output.feedback)
-    
-    # Check approval
-    is_approved = reviewer_output.approved
+    ctx.set_state("review_summary", feedback)
+    is_approved = decision
     
     # Force approval if max revisions reached (escape hatch)
     if revision_count >= max_revisions and not is_approved:
@@ -209,28 +190,29 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
         is_approved = True
     
     if is_approved:
+        print(f"\n📊 Decision: PASS — tests approved")
         print(f"\n➡️  Routing: APPROVED → Create PR")
         results["steps"].append({
             "step": "review", 
             "success": True,
             "decision": "approved",
             "revision": revision_count + 1,
-            "feedback": reviewer_output.feedback
+            "feedback": feedback[:500]
         })
-        await ctx.send_message(ReviewerDecision.APPROVED)                                        # Review approved routing in orchestration
+        await ctx.send_message(ReviewerDecision.APPROVED)
     else:
+        print(f"\n📊 Decision: FAIL — revision needed")
         print(f"\n➡️  Routing: REVISE → Planner Agent (revision #{revision_count + 2})")
-        print(f"      Feedback: {reviewer_output.feedback[:150]}...")
         ctx.set_state("revision_count", revision_count + 1)
-        ctx.set_state("review_feedback", reviewer_output.feedback)
+        ctx.set_state("review_feedback", feedback)
         results["steps"].append({
             "step": "review", 
             "success": True,
             "decision": "revise",
             "revision": revision_count + 1,
-            "feedback": reviewer_output.feedback
+            "feedback": feedback[:500]
         })
-        await ctx.send_message(ReviewerDecision.REVISE)                                          # Review revise routing in orchestration
+        await ctx.send_message(ReviewerDecision.REVISE)
 
 
 #-----------------------------Creating Pull Request-----------------------------#
@@ -308,7 +290,6 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
             origin = repo.remote('origin')
             
             # Temporarily set authenticated URL for push (clone strips the PAT)
-            import re as _re
             original_url = origin.url
             auth_url = _re.sub(
                 r'https://([^@]+@)?',
@@ -613,11 +594,7 @@ class UnitTestOrchestration:
         # Create agents
         verifier_agent = create_verifier_agent()
         planner_agent = create_planner_agent()
-        if self.config.use_copilot_sdk:
-            print("   Using Copilot SDK for implementer agent")
-            implementer_agent = create_copilot_sdk_implementer()
-        else:
-            implementer_agent = create_implementer_agent()
+        implementer_agent = create_implementer_agent()
         reviewer_agent = create_reviewer_agent()
         
         # Create agent executors

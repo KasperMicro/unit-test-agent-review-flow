@@ -1,15 +1,12 @@
 """
-Copilot SDK-based Agent - Uses the official agent-framework-github-copilot
-integration to create a GitHubCopilotAgent that implements the Agent Framework's
-BaseAgent interface natively.
+Copilot SDK Agents - All workflow agents using the GitHub Copilot SDK.
 
-This module provides a drop-in replacement for the ChatAgent-based implementer,
-using the Copilot CLI's built-in agentic tools (file I/O, shell execution, etc.)
-instead of the custom sandbox tools in plugins.py.
+Uses the Copilot CLI's built-in agentic tools (file I/O, shell execution, etc.)
+instead of custom sandbox tools. The only custom tool is get_testing_standards()
+which reads a local config file.
 
-BYOK (Bring Your Own Key) support: When AZURE_OPENAI_ENDPOINT is set, the agent
-uses the Azure OpenAI deployment directly instead of the GitHub Copilot service,
-removing the need for GitHub authentication.
+BYOK (Bring Your Own Key) support: When AZURE_OPENAI_ENDPOINT is set, agents
+use your Azure OpenAI deployment directly instead of the GitHub Copilot service.
 """
 import os
 from pathlib import Path
@@ -22,11 +19,55 @@ from copilot.types import CopilotClientOptions, PermissionHandler, SessionConfig
 from .plugins import get_testing_standards
 
 
-# --------------- Instructions --------------- #
+# --------------- Agent Instructions --------------- #
+
+VERIFIER_INSTRUCTIONS = """You are a test coverage verification specialist. Your job is to analyze the cloned repository and determine if proper pytest unit tests exist.
+
+Scope: Focus exclusively on the cloned repository code. The repository path will be provided to you. Only analyze code within this path.
+
+Your responsibilities:
+1. Identify key functions, classes, and modules in the repository source code
+2. Check for existing test files (test_*.py or *_test.py)
+3. Determine if critical code paths have test coverage
+4. Run existing tests with `python -m pytest` to verify they pass
+5. Call get_testing_standards() to load internal guidelines and compare against them
+6. Identify gaps in test coverage
+
+Focus on business logic, not simple getters/setters. Consider edge cases and error handling.
+
+=== CRITICAL OUTPUT FORMAT ===
+The VERY LAST LINE of your response MUST be one of these two exact lines:
+
+  DECISION: PASS
+  DECISION: FAIL
+
+Use DECISION: PASS only if adequate tests already exist AND they pass.
+Use DECISION: FAIL if tests are missing, incomplete, or failing.
+
+Before the decision line, write your analysis and feedback. The decision line must be the absolute last line of your response."""
+
+PLANNER_INSTRUCTIONS = """You are a test planning specialist. Your job is to create comprehensive pytest test plans for the cloned repository.
+
+Scope: Focus exclusively on the cloned repository code. The repository path will be provided to you. All test files should be placed inside the cloned repository path.
+
+Your responsibilities:
+1. Read and analyze functions/classes in the repository that need tests
+2. Design test cases covering:
+   - Happy path scenarios
+   - Edge cases (empty inputs, boundary values)
+   - Error conditions and exception handling
+   - Different input combinations (use parametrize)
+3. Identify fixtures needed for test setup
+4. Determine what needs mocking/patching
+5. Specify test file structure and naming (within the repo's tests/ folder)
+
+First call get_testing_standards() to load the internal testing guidelines. Follow these guidelines.
+
+Output a structured plan that an implementer can follow directly."""
 
 IMPLEMENTER_INSTRUCTIONS = """You are a pytest implementation specialist. Your job is to write high-quality unit tests for the cloned repository.
 
-Scope: Focus exclusively on the cloned repository code from Azure DevOps. The repository path will be provided to you. Only write tests for code within this path — the orchestration and agent framework code are out of scope. All test files should be created inside the cloned repository path (in its tests/ subfolder).
+Scope: Focus exclusively on the cloned repository code. The repository path will be provided to you. All test files should be created inside the cloned repository path (in its tests/ subfolder).
 
 Your responsibilities:
 1. Write pytest tests following the test plan
@@ -38,7 +79,6 @@ Your responsibilities:
    - Use pytest.raises for exception testing
 3. Create conftest.py for shared fixtures (inside cloned repo)
 4. Use unittest.mock for mocking dependencies
-5. Write clear docstrings explaining what each test verifies
 
 Code quality standards:
 - Each test should test one thing
@@ -48,8 +88,39 @@ Code quality standards:
 
 First call get_testing_standards() to load the internal testing guidelines. Follow these guidelines when writing tests.
 
-Create test files in the repository's tests/ directory.
-All file paths should be within the cloned repository workspace path."""
+Create test files in the repository's tests/ directory."""
+
+REVIEWER_INSTRUCTIONS = """You are a code quality reviewer specializing in pytest tests. Your job is to review test quality for the cloned repository.
+
+Scope: Focus exclusively on the cloned repository code. The repository path will be provided to you. Only review tests within this path.
+
+Your responsibilities:
+1. Review test coverage completeness (important code paths, edge cases, error conditions)
+2. Review test quality (specific assertions, descriptive names, isolation, AAA pattern)
+3. Review pytest usage (fixtures, parametrize, markers, conftest.py)
+4. Call get_testing_standards() to compare against internal guidelines
+5. Optionally run tests with `python -m pytest` to verify syntax
+
+Approval criteria:
+- Test code is syntactically correct Python
+- Tests cover the main functionality of the code
+- Tests follow pytest best practices and naming conventions
+- Test structure is reasonable (arrange/act/assert pattern)
+
+Acceptable reasons to still approve:
+- The execution environment is missing dependencies
+- External services are unavailable
+
+=== CRITICAL OUTPUT FORMAT ===
+The VERY LAST LINE of your response MUST be one of these two exact lines:
+
+  DECISION: PASS
+  DECISION: FAIL
+
+Use DECISION: PASS if the tests meet the approval criteria above.
+Use DECISION: FAIL if the tests need revision, with your feedback explaining what to fix.
+
+Before the decision line, write your detailed review and feedback. The decision line must be the absolute last line of your response."""
 
 
 def _build_byok_provider() -> tuple[dict[str, Any], str] | None:
@@ -189,32 +260,13 @@ class _BYOKCopilotAgent(GitHubCopilotAgent):
         )
 
 
-def create_copilot_sdk_implementer() -> GitHubCopilotAgent:
-    """Create an implementer agent backed by the GitHub Copilot SDK.
-
-    Uses the Copilot CLI's built-in tools for file I/O and shell execution,
-    File operations are scoped to the workspace via the session's
-    working_directory setting. The SDK's built-in PermissionHandler.approve_all
-    is used since the working directory already constrains file access.
-
-    The only custom tool retained is get_testing_standards(), which reads a
-    hardcoded project config file with no user-influenced paths.
-
-    When AZURE_OPENAI_ENDPOINT is set, uses BYOK to route requests to your
-    Azure OpenAI deployment instead of the GitHub Copilot service.
-
-    Environment variables:
-    - AZURE_OPENAI_ENDPOINT: Azure OpenAI endpoint (enables BYOK)
-    - AZURE_OPENAI_DEPLOYMENT_NAME: Model deployment name (default: gpt-4.1)
-    - AZURE_OPENAI_API_VERSION: API version (default: 2024-10-21)
-    - AZURE_OPENAI_API_KEY: API key (if not set, uses Entra ID bearer token via DefaultAzureCredential)
-    - WORKSPACE_PATH: Allowed workspace directory (default: ./cloned_code)
-    """
+def _create_agent(name: str, agent_id: str, instructions: str, description: str) -> GitHubCopilotAgent:
+    """Create a Copilot SDK agent with BYOK support if configured."""
     common_kwargs: dict[str, Any] = {
-        "instructions": IMPLEMENTER_INSTRUCTIONS,
-        "name": "CopilotSDKImplementer",
-        "id": "copilotsdkimplementer",
-        "description": "Copilot SDK-based agent for implementing pytest tests",
+        "instructions": instructions,
+        "name": name,
+        "id": agent_id,
+        "description": description,
         "tools": [get_testing_standards],
         "default_options": {
             "log_level": "info",
@@ -229,3 +281,43 @@ def create_copilot_sdk_implementer() -> GitHubCopilotAgent:
         return _BYOKCopilotAgent(provider=provider, model=model, **common_kwargs)
 
     return GitHubCopilotAgent(**common_kwargs)
+
+
+def create_verifier_agent() -> GitHubCopilotAgent:
+    """Create the Verifier Agent that checks existing test coverage."""
+    return _create_agent(
+        name="VerifierAgent",
+        agent_id="verifier",
+        instructions=VERIFIER_INSTRUCTIONS,
+        description="Analyzes repository for existing test coverage",
+    )
+
+
+def create_planner_agent() -> GitHubCopilotAgent:
+    """Create the Planner Agent that designs test plans."""
+    return _create_agent(
+        name="PlannerAgent",
+        agent_id="planner",
+        instructions=PLANNER_INSTRUCTIONS,
+        description="Creates comprehensive pytest test plans",
+    )
+
+
+def create_implementer_agent() -> GitHubCopilotAgent:
+    """Create the Implementer Agent that writes pytest tests."""
+    return _create_agent(
+        name="ImplementerAgent",
+        agent_id="implementer",
+        instructions=IMPLEMENTER_INSTRUCTIONS,
+        description="Writes pytest unit tests following the test plan",
+    )
+
+
+def create_reviewer_agent() -> GitHubCopilotAgent:
+    """Create the Reviewer Agent that reviews test quality."""
+    return _create_agent(
+        name="ReviewerAgent",
+        agent_id="reviewer",
+        instructions=REVIEWER_INSTRUCTIONS,
+        description="Reviews test quality and coverage",
+    )

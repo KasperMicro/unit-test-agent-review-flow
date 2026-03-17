@@ -13,51 +13,49 @@ from dotenv import load_dotenv
 from agent_framework import AgentExecutor, AgentExecutorResponse, WorkflowBuilder, WorkflowContext, FunctionExecutor, Case, Default
 from agent_framework.devui import serve
 
-from agents.agent_definitions import (
+from agents import (
     create_verifier_agent,
     create_planner_agent,
     create_implementer_agent,
     create_reviewer_agent,
 )
-from agents.copilot_sdk_agent import create_copilot_sdk_implementer
-from agents.models import VerifierOutput, ReviewerOutput
-from orchestration import VerifierDecision, ReviewerDecision
+from orchestration import VerifierDecision, ReviewerDecision, _parse_decision
 
 
 #----------------------------- Simplified Routing for DevUI -----------------------------#
 async def _devui_route_verifier(response: AgentExecutorResponse, ctx: WorkflowContext[VerifierDecision]) -> None:
-    """Route based on verifier decision for DevUI demo."""
-    verifier_output: VerifierOutput = response.agent_response.value
+    """Route based on verifier DECISION: PASS/FAIL for DevUI demo."""
+    text = response.agent_response.text or ""
+    decision = _parse_decision(text)
     
-    if verifier_output is None:
-        print("❌ Could not parse verifier response")
+    if decision is None:
+        print("\n❌ Could not find DECISION marker in verifier response")
         await ctx.send_message(VerifierDecision.TESTS_NEEDED)
         return
     
-    print(f"\n📊 Verifier Decision: tests_exist_and_correct = {verifier_output.tests_exist_and_correct}")
-    print(f"💬 Feedback: {verifier_output.feedback[:200]}...")
-    
-    if verifier_output.tests_exist_and_correct:
+    if decision:
+        print(f"\n📊 Verifier Decision: PASS")
         await ctx.send_message(VerifierDecision.TESTS_CORRECT)
     else:
+        print(f"\n📊 Verifier Decision: FAIL")
         await ctx.send_message(VerifierDecision.TESTS_NEEDED)
 
 
 async def _devui_route_reviewer(response: AgentExecutorResponse, ctx: WorkflowContext[ReviewerDecision]) -> None:
-    """Route based on reviewer decision for DevUI demo."""
-    reviewer_output: ReviewerOutput = response.agent_response.value
+    """Route based on reviewer DECISION: PASS/FAIL for DevUI demo."""
+    text = response.agent_response.text or ""
+    decision = _parse_decision(text)
     
-    if reviewer_output is None:
-        print("❌ Could not parse reviewer response")
+    if decision is None:
+        print("\n❌ Could not find DECISION marker in reviewer response")
         await ctx.send_message(ReviewerDecision.REVISE)
         return
     
-    print(f"\n📊 Reviewer Decision: approved = {reviewer_output.approved}")
-    print(f"💬 Feedback: {reviewer_output.feedback[:200]}...")
-    
-    if reviewer_output.approved:
+    if decision:
+        print(f"\n📊 Reviewer Decision: PASS")
         await ctx.send_message(ReviewerDecision.APPROVED)
     else:
+        print(f"\n📊 Reviewer Decision: FAIL")
         await ctx.send_message(ReviewerDecision.REVISE)
 
 
@@ -98,12 +96,7 @@ def create_devui_workflow():
     # Create agents
     verifier = create_verifier_agent()
     planner = create_planner_agent()
-    use_copilot_sdk = os.getenv("USE_COPILOT_SDK", "").lower() in ("1", "true", "yes")
-    if use_copilot_sdk:
-        print("   Using Copilot SDK for implementer agent")
-        implementer = create_copilot_sdk_implementer()
-    else:
-        implementer = create_implementer_agent()
+    implementer = create_implementer_agent()
     reviewer = create_reviewer_agent()
     
     # Create executors
@@ -179,12 +172,7 @@ def main():
     logger.info("Creating agents...")
     verifier = create_verifier_agent()
     planner = create_planner_agent()
-    use_copilot_sdk = os.getenv("USE_COPILOT_SDK", "").lower() in ("1", "true", "yes")
-    if use_copilot_sdk:
-        logger.info("  Using Copilot SDK for implementer agent")
-        implementer = create_copilot_sdk_implementer()
-    else:
-        implementer = create_implementer_agent()
+    implementer = create_implementer_agent()
     reviewer = create_reviewer_agent()
     
     # Create workflow

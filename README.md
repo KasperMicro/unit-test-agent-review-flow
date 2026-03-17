@@ -21,8 +21,8 @@
 This project demonstrates how multiple AI agents can work together to **automatically
 generate pytest unit tests** for a code repository hosted in Azure DevOps.
 
-It uses the **Microsoft Agent Framework** to coordinate four specialised agents in a
-pipeline:
+It uses the **Microsoft Agent Framework** with the **GitHub Copilot SDK** to coordinate
+four specialised agents in a pipeline:
 
 1. **Clone** the target repository from Azure DevOps.
 2. **Verify** what tests already exist and where the gaps are.
@@ -48,7 +48,7 @@ If the reviewer is not satisfied, the pipeline loops back to the planner for rev
                         └──────┬───────┘
                                │
               ┌────────────────┴────────────────┐
-              │ tests correct                   │ tests needed
+              │ DECISION: PASS                  │ DECISION: FAIL
               ▼                                 ▼
         ┌──────────┐                     ┌──────────────┐
         │ Complete │                     │   Planner    │◄──────┐
@@ -63,7 +63,7 @@ If the reviewer is not satisfied, the pipeline loops back to the planner for rev
                                          └──────┬───────┘       │
                                                 │               │
                                ┌────────────────┴───────┐       │
-                               │ approved               │ revise│
+                               │ DECISION: PASS         │ FAIL  │
                                ▼                        └───────┘
                          ┌──────────┐
                          │Create PR │
@@ -71,72 +71,49 @@ If the reviewer is not satisfied, the pipeline loops back to the planner for rev
 ```
 
 The workflow is built declaratively with `WorkflowBuilder` from the Microsoft Agent
-Framework. Each agent is an `AgentExecutor` and routing decisions are handled by
-`FunctionExecutor` nodes that inspect the agent's structured output (Pydantic models).
+Framework. Each agent is an `AgentExecutor` backed by a `GitHubCopilotAgent`, and
+routing decisions are handled by `FunctionExecutor` nodes that parse the agent's
+`DECISION: PASS` or `DECISION: FAIL` marker from its text output.
 
 ---
 
 ## The Four Agents
 
-| Agent | Role | Tools it uses |
-|-------|------|---------------|
-| **Verifier** | Scans the repo, finds existing tests, runs pytest, identifies coverage gaps. Returns a structured `VerifierOutput` with a `tests_exist_and_correct` boolean. | `read_local_file`, `list_local_files`, `run_pytest`, `get_testing_standards` |
-| **Planner** | Designs a comprehensive test plan (what to test, which fixtures and mocks are needed, edge cases). | `read_local_file`, `list_local_files`, `get_testing_standards` |
-| **Implementer** | Writes the actual pytest files following the plan and the testing standards. Saves them into the repo's `tests/` directory. | `read_local_file`, `write_local_file`, `list_local_files`, `run_pytest`, `get_testing_standards` |
-| **Reviewer** | Reviews the implemented tests for quality, runs them, and returns a structured `ReviewerOutput` with an `approved` boolean. If not approved, it provides feedback that goes back to the planner. | `read_local_file`, `write_local_file`, `list_local_files`, `run_pytest`, `run_pytest_with_coverage`, `get_testing_standards` |
+All agents are **GitHub Copilot SDK agents** (`GitHubCopilotAgent`) running through the
+Microsoft Agent Framework. They use the Copilot SDK's built-in tools for file I/O and
+shell execution, plus one custom tool (`get_testing_standards`) that loads the
+organisation's pytest conventions.
 
-All agents use **Azure OpenAI** (via the Microsoft Agent Framework's `AzureOpenAIChatClient`) and support both API key and managed-identity authentication.
+| Agent | Role |
+|-------|------|
+| **Verifier** | Scans the repo, finds existing tests, runs pytest, identifies coverage gaps. Ends with `DECISION: PASS` if tests are adequate, `DECISION: FAIL` otherwise. |
+| **Planner** | Designs a comprehensive test plan (what to test, fixtures, mocks, edge cases). |
+| **Implementer** | Writes the actual pytest files following the plan and testing standards. |
+| **Reviewer** | Reviews the tests for quality, optionally runs them. Ends with `DECISION: PASS` to approve or `DECISION: FAIL` with feedback for revision. |
 
----
+### BYOK (Bring Your Own Key)
 
-## Agent Tools (Plugins)
+When `AZURE_OPENAI_ENDPOINT` is set, all agents use **BYOK mode** — LLM calls are
+routed directly to your Azure OpenAI deployment instead of the GitHub Copilot service.
+This removes the need for GitHub Copilot authentication.
 
-Agents interact with the local file system and pytest through a set of sandboxed tool
-functions defined in `agents/plugins.py`. Every file operation is restricted to the
-workspace directory (the cloned repo) to prevent agents from modifying the orchestration
-code itself.
-
-### File Tools
-
-| Tool | Description |
-|------|-------------|
-| `read_local_file(file_path)` | Read a file from the workspace |
-| `write_local_file(file_path, content)` | Write/create a file in the workspace |
-| `list_local_files(directory, pattern)` | List files matching a glob pattern |
-
-### Pytest Tools
-
-| Tool | Description |
-|------|-------------|
-| `run_pytest(test_path, verbose)` | Run pytest on a test file or directory |
-| `run_pytest_with_coverage(test_path, source_path)` | Run pytest with a coverage report |
-| `get_testing_standards()` | Load the organisation's testing standards from `config/testing_standards.md` |
-
-### Path Security
-
-- Only **relative paths** are accepted (e.g. `dummy-repo/app.py`).
-- **Absolute paths** and **directory traversal** (`..`) are rejected.
-- All paths are resolved against the `WORKSPACE_PATH` environment variable.
+Authentication priority:
+1. **`AZURE_OPENAI_API_KEY`** — static API key (simplest).
+2. **`DefaultAzureCredential`** — Entra ID / managed identity (if no API key is set).
 
 ---
 
-## Structured Agent Outputs
+## Agent Tools
 
-The Verifier and Reviewer agents return structured JSON via Pydantic models so the
-workflow can make deterministic routing decisions:
+Agents use the **Copilot SDK's built-in tools** for file operations and shell commands
+(reading, writing, listing files, running terminal commands like `python -m pytest`).
+File access is scoped to the workspace via the session's `working_directory` setting.
 
-```python
-class VerifierOutput(BaseModel):
-    tests_exist_and_correct: bool   # Are existing tests adequate?
-    feedback: str                   # Summary of findings
+The only custom tool is:
 
-class ReviewerOutput(BaseModel):
-    approved: bool                  # Do the tests meet quality standards?
-    feedback: str                   # Review notes and issues
-```
-
-These models are passed as `response_format` to the agent, guaranteeing parseable
-structured output from the LLM.
+| Tool | Description |
+|------|-------------|
+| `get_testing_standards()` | Loads the organisation's testing standards from `config/testing_standards.md` |
 
 ---
 
@@ -182,9 +159,8 @@ AgentOrchestration/
 ├── requirements.txt               # Python dependencies
 ├── agents/
 │   ├── __init__.py                # Package exports
-│   ├── agent_definitions.py       # Agent creation functions and system prompts
-│   ├── models.py                  # VerifierOutput / ReviewerOutput Pydantic models
-│   └── plugins.py                 # Sandboxed tool functions (file I/O, pytest)
+│   ├── copilot_sdk_agent.py       # All agent definitions (GitHubCopilotAgent + BYOK)
+│   └── plugins.py                 # Custom tool: get_testing_standards()
 ├── services/
 │   ├── __init__.py                # Package exports
 │   └── azure_devops_service.py    # Azure DevOps SDK wrapper (clone, branch, PR)
@@ -203,7 +179,7 @@ AgentOrchestration/
 | **Git** | Installed and available on `PATH` |
 | **Azure DevOps** | An organisation, project, and repository you have access to |
 | **Azure DevOps PAT** | Scopes: `Code (Read & Write)`, `Pull Request Threads (Read & Write)` |
-| **Azure OpenAI** | A deployed model (e.g. GPT-4) with an endpoint URL |
+| **Azure OpenAI** | A deployed model with an endpoint URL (for BYOK mode) |
 
 ---
 
@@ -227,11 +203,11 @@ AZURE_DEVOPS_PROJECT=your-project-name
 AZURE_DEVOPS_REPO_NAME=your-repo-name
 AZURE_DEVOPS_DEFAULT_BRANCH=main
 
-# Azure OpenAI
+# Azure OpenAI (BYOK — routes LLM calls to your deployment)
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4
-# AZURE_OPENAI_API_KEY=your-key        # Optional — omit to use managed identity
-# AZURE_OPENAI_API_VERSION=2024-08-01-preview  # Optional — this is the default
+AZURE_OPENAI_API_KEY=your-key              # Optional — omit to use DefaultAzureCredential
+AZURE_OPENAI_API_VERSION=2024-10-21        # Optional — this is the default
 
 # Workspace (where repos are cloned to)
 WORKSPACE_PATH=./cloned_code
@@ -288,8 +264,8 @@ experimentation.
 | **"Repository not found"** | Verify `AZURE_DEVOPS_REPO_NAME` matches the exact repo name in Azure DevOps. Ensure the PAT has read access. |
 | **"Branch creation failed"** | Ensure the PAT has write access. Confirm the source branch exists. |
 | **"PR creation failed"** | A PR for the same branch may already exist. Verify the target branch exists. |
-| **"Pytest not found"** | The tool auto-installs pytest if missing. Check your Python environment has pip access. |
 | **Azure OpenAI auth errors** | If not using an API key, ensure `DefaultAzureCredential` can authenticate (e.g. `az login`). |
+| **Directory locked on Windows** | VS Code's file watcher may hold a lock on `cloned_code/`. The clone logic retries and can init in-place as a fallback. |
 
 ---
 
@@ -297,8 +273,8 @@ experimentation.
 
 ### Add a new agent
 
-1. Write a creation function in `agents/agent_definitions.py` (define system prompt, tools, and optional `response_format`).
-2. If the agent needs new tools, add them in `agents/plugins.py`.
+1. Write a creation function in `agents/copilot_sdk_agent.py` using the `_create_agent()` factory.
+2. If the agent needs new custom tools, add them in `agents/plugins.py`.
 3. Wire the new agent into the workflow in `orchestration.py` using `AgentExecutor` and `WorkflowBuilder`.
 
 ### Change testing standards
