@@ -112,16 +112,26 @@ class AzureDevOpsService:
                 # Pull latest if already exists - update remote URL with auth first
                 local_repo = git.Repo(repo_path)
                 local_repo.remotes.origin.set_url(auth_url)
-                local_repo.remotes.origin.pull(branch)
+                # Disable credential helper to avoid "Argument cannot be empty"
+                # errors from Windows credential manager during fetch
+                with local_repo.config_writer() as cw:
+                    cw.set_value("credential", "helper", "")
+                local_repo.remotes.origin.fetch()
+                local_repo.git.reset("--hard", f"origin/{branch}")
+                # Remove PAT from persisted remote URL
+                local_repo.remotes.origin.set_url(clone_url)
                 print(f"Updated existing repository at {repo_path}")
             except git.exc.InvalidGitRepositoryError:
                 # Directory exists but is not a valid git repo — remove and re-clone
                 import shutil
                 shutil.rmtree(repo_path)
-                git.Repo.clone_from(auth_url, repo_path, branch=branch)
+                cloned = git.Repo.clone_from(auth_url, repo_path, branch=branch)
+                cloned.remotes.origin.set_url(clone_url)
                 print(f"Replaced invalid directory and cloned repository to {repo_path}")
         else:
-            git.Repo.clone_from(auth_url, repo_path, branch=branch)
+            cloned = git.Repo.clone_from(auth_url, repo_path, branch=branch)
+            # Remove PAT from persisted remote URL
+            cloned.remotes.origin.set_url(clone_url)
             print(f"Cloned repository to {repo_path}")
             
         return repo_path

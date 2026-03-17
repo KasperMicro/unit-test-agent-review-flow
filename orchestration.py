@@ -25,6 +25,7 @@ from agents import (
     create_planner_agent,
     create_implementer_agent,
     create_reviewer_agent,
+    create_copilot_sdk_implementer,
 )
 from agents.models import VerifierOutput, ReviewerOutput
 from services.azure_devops_service import create_devops_service_from_env
@@ -50,6 +51,7 @@ class OrchestrationConfig:
     feature_branch_prefix: str = "feature/add-tests-"
     pr_labels: list = field(default_factory=lambda: ["auto-generated", "unit-tests"])
     max_revision_iterations: int = 3
+    use_copilot_sdk: bool = False  # Use Copilot SDK for the implementer agent
 
 
 async def _route_verifier_decision(response: AgentExecutorResponse, ctx: WorkflowContext[VerifierDecision]) -> None:
@@ -73,7 +75,7 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
         print(f"   {text[:500]}..." if len(text) > 500 else f"   {text}")
     
     # Get run kwargs from shared state
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     results = run_kwargs.get("results", {"steps": []})
     
     # Get structured output directly from agent response (guaranteed by response_format)
@@ -82,8 +84,8 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
     if verifier_output is None:
         # Fallback if response parsing somehow failed
         print("\n❌ Could not parse verifier response. Defaulting to tests needed.")
-        await ctx.set_shared_state("verifier_report", text[:500])
-        await ctx.set_shared_state("verifier_feedback", text)
+        ctx.set_state("verifier_report", text[:500])
+        ctx.set_state("verifier_feedback", text)
         results["steps"].append({
             "step": "verify", 
             "success": False,
@@ -100,8 +102,8 @@ async def _route_verifier_decision(response: AgentExecutorResponse, ctx: Workflo
     print(f"   {verifier_output.feedback}")
     
     # Store feedback for downstream agents
-    await ctx.set_shared_state("verifier_report", verifier_output.feedback)
-    await ctx.set_shared_state("verifier_feedback", verifier_output.feedback)
+    ctx.set_state("verifier_report", verifier_output.feedback)
+    ctx.set_state("verifier_feedback", verifier_output.feedback)
     
     if verifier_output.tests_exist_and_correct:
         print(f"\n➡️  Routing: TESTS_CORRECT → Workflow Complete (no changes needed)")
@@ -134,11 +136,13 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
         ctx: Workflow context with shared state
     """
     # Get run kwargs from shared state
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     
     # Get revision_count (may not exist yet)
     try:
-        revision_count = await ctx.get_shared_state("revision_count")
+        revision_count = ctx.get_state("revision_count")
+        if revision_count is None:
+            revision_count = 0
     except KeyError:
         revision_count = run_kwargs.get("revision_count", 0)
     
@@ -165,7 +169,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
         
         if revision_count >= max_revisions:
             print(f"   ⚠️ Max revisions reached. Forcing PR.")
-            await ctx.set_shared_state("review_summary", f"Forced after {max_revisions} revisions")
+            ctx.set_state("review_summary", f"Forced after {max_revisions} revisions")
             results["steps"].append({
                 "step": "review", 
                 "success": False,
@@ -176,8 +180,8 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
             await ctx.send_message(ReviewerDecision.APPROVED)                                  # Review approved routing in orchestration
         else:
             print("   🔄 Forcing revision.")
-            await ctx.set_shared_state("revision_count", revision_count + 1)
-            await ctx.set_shared_state("review_feedback", text[:500])
+            ctx.set_state("revision_count", revision_count + 1)
+            ctx.set_state("review_feedback", text[:500])
             results["steps"].append({
                 "step": "review", 
                 "success": False,
@@ -194,7 +198,7 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
     print(f"   {reviewer_output.feedback}")
     
     # Store feedback for downstream agents
-    await ctx.set_shared_state("review_summary", reviewer_output.feedback)
+    ctx.set_state("review_summary", reviewer_output.feedback)
     
     # Check approval
     is_approved = reviewer_output.approved
@@ -217,8 +221,8 @@ async def _route_reviewer_decision(response: AgentExecutorResponse, ctx: Workflo
     else:
         print(f"\n➡️  Routing: REVISE → Planner Agent (revision #{revision_count + 2})")
         print(f"      Feedback: {reviewer_output.feedback[:150]}...")
-        await ctx.set_shared_state("revision_count", revision_count + 1)
-        await ctx.set_shared_state("review_feedback", reviewer_output.feedback)
+        ctx.set_state("revision_count", revision_count + 1)
+        ctx.set_state("review_feedback", reviewer_output.feedback)
         results["steps"].append({
             "step": "review", 
             "success": True,
@@ -242,7 +246,7 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
     print("="*70)
     
     # Get run kwargs from shared state
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     repo_path_relative = run_kwargs.get("repo_path")
     config = run_kwargs.get("config")
     devops_service = run_kwargs.get("devops_service")
@@ -302,11 +306,25 @@ async def _create_pull_request(message: Any, ctx: WorkflowContext[str]) -> None:
         if repo.is_dirty() or repo.untracked_files:
             repo.index.commit("Add/update pytest unit tests")
             origin = repo.remote('origin')
-            origin.push(branch_name, set_upstream=True)
+            
+            # Temporarily set authenticated URL for push (clone strips the PAT)
+            import re as _re
+            original_url = origin.url
+            auth_url = _re.sub(
+                r'https://([^@]+@)?',
+                f'https://:{devops_service.config.pat}@',
+                original_url
+            )
+            origin.set_url(auth_url)
+            try:
+                origin.push(branch_name, set_upstream=True)
+            finally:
+                # Remove PAT from persisted remote URL
+                origin.set_url(original_url)
             
             # Build PR description
-            verifier_report = str(await ctx.get_shared_state("verifier_report") or "")[:500]
-            review_summary = str(await ctx.get_shared_state("review_summary") or "")[:500]
+            verifier_report = str(ctx.get_state("verifier_report") or "")[:500]
+            review_summary = str(ctx.get_state("review_summary") or "")[:500]
             
             description = f"""This PR adds/updates pytest unit tests.
 
@@ -369,7 +387,7 @@ async def _handle_tests_already_correct(message: Any, ctx: WorkflowContext[str])
     print("\n✅ Tests already exist and are correct!")
     print("   ℹ️ No changes needed - skipping PR creation.")
     
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     results = run_kwargs.get("results", {"steps": []})
     results["steps"].append({
         "step": "complete", 
@@ -427,18 +445,18 @@ async def _log_implementer_output(response: AgentExecutorResponse, ctx: Workflow
 
 async def _prepare_planner_from_verifier(message: Any, ctx: WorkflowContext[str]) -> None:
     """Prepare planner input with verifier feedback for initial planning."""
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     repo_path = run_kwargs.get("repo_path")
     
     # Get the verifier feedback (structured)
     try:
-        verifier_feedback = await ctx.get_shared_state("verifier_feedback")
+        verifier_feedback = ctx.get_state("verifier_feedback")
     except KeyError:
         verifier_feedback = "Tests are needed for this repository."
     
     # Get functions needing tests if available
     try:
-        functions_needing_tests = await ctx.get_shared_state("functions_needing_tests")
+        functions_needing_tests = ctx.get_state("functions_needing_tests")
         functions_list = "\n".join(f"  - {func}" for func in functions_needing_tests) if functions_needing_tests else ""
     except KeyError:
         functions_list = ""
@@ -479,24 +497,24 @@ Ensure test coverage for edge cases and error handling."""
 
 async def _prepare_planner_with_feedback(message: Any, ctx: WorkflowContext[str]) -> None:
     """Prepare planner input with structured review feedback when revision is needed."""
-    run_kwargs = await ctx.get_shared_state("_workflow_run_kwargs") or {}
+    run_kwargs = ctx.get_state("_workflow_run_kwargs") or {}
     repo_path = run_kwargs.get("repo_path")
     
     # Get the review feedback (structured)
     try:
-        review_feedback = await ctx.get_shared_state("review_feedback")
+        review_feedback = ctx.get_state("review_feedback")
     except KeyError:
         review_feedback = "No specific feedback provided."
     
     # Get specific issues if available
     try:
-        review_issues = await ctx.get_shared_state("review_issues")
+        review_issues = ctx.get_state("review_issues")
         issues_list = "\n".join(f"  - {issue}" for issue in review_issues) if review_issues else ""
     except KeyError:
         issues_list = ""
     
     try:
-        revision_count = await ctx.get_shared_state("revision_count")
+        revision_count = ctx.get_state("revision_count")
     except KeyError:
         revision_count = 1
     
@@ -595,7 +613,11 @@ class UnitTestOrchestration:
         # Create agents
         verifier_agent = create_verifier_agent()
         planner_agent = create_planner_agent()
-        implementer_agent = create_implementer_agent()
+        if self.config.use_copilot_sdk:
+            print("   Using Copilot SDK for implementer agent")
+            implementer_agent = create_copilot_sdk_implementer()
+        else:
+            implementer_agent = create_implementer_agent()
         reviewer_agent = create_reviewer_agent()
         
         # Create agent executors
@@ -616,9 +638,12 @@ class UnitTestOrchestration:
         log_implementer_output = FunctionExecutor(_log_implementer_output, id="log_implementer")
         
         #----------------------------- Build Workflow -----------------------------#
+        max_iterations = (self.config.max_revision_iterations + 1) * 7 + 12
         self.workflow = (
-            WorkflowBuilder()
-            .set_start_executor(verifier_executor)
+            WorkflowBuilder(
+                start_executor=verifier_executor,
+                max_iterations=max_iterations,
+            )
             .add_edge(verifier_executor, verifier_routing)
             .add_switch_case_edge_group(
                 verifier_routing,
@@ -648,8 +673,6 @@ class UnitTestOrchestration:
             # Route revision preparation to planner
             .add_edge(prepare_planner_revision, planner_executor)
             .add_edge(create_pr_executor, handle_complete)
-            # Calculate max iterations: initial(7) + revisions(5 each with feedback step) + final(2) + buffer
-            .set_max_iterations((self.config.max_revision_iterations + 1) * 7 + 12)
             .build()
         )
         
@@ -678,12 +701,12 @@ class UnitTestOrchestration:
                 self.config.target_branch
             )
             results["steps"].append({"step": "clone", "success": True})
-            print(f"   Cloned to: {self._repo_path}")
+            print(f"   Cloned to: {self._repo_relative}")
             
             # Set WORKSPACE_PATH so agent plugins can resolve relative paths
             workspace_abs = os.path.abspath(self.config.workspace_path)
             os.environ["WORKSPACE_PATH"] = workspace_abs
-            print(f"   🔒 Agents restricted to workspace: {workspace_abs}")
+            print(f"   🔒 Agents restricted to workspace: {self.config.workspace_path}")
             
             # Step 2: Run the agent workflow
             print("\n" + "="*70)

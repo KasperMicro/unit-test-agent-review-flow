@@ -19,6 +19,7 @@ from agents.agent_definitions import (
     create_implementer_agent,
     create_reviewer_agent,
 )
+from agents.copilot_sdk_agent import create_copilot_sdk_implementer
 from agents.models import VerifierOutput, ReviewerOutput
 from orchestration import VerifierDecision, ReviewerDecision
 
@@ -97,7 +98,12 @@ def create_devui_workflow():
     # Create agents
     verifier = create_verifier_agent()
     planner = create_planner_agent()
-    implementer = create_implementer_agent()
+    use_copilot_sdk = os.getenv("USE_COPILOT_SDK", "").lower() in ("1", "true", "yes")
+    if use_copilot_sdk:
+        print("   Using Copilot SDK for implementer agent")
+        implementer = create_copilot_sdk_implementer()
+    else:
+        implementer = create_implementer_agent()
     reviewer = create_reviewer_agent()
     
     # Create executors
@@ -119,9 +125,10 @@ def create_devui_workflow():
     workflow = (
         WorkflowBuilder(
             name="Unit Test Generation",
-            description="Analyzes code, plans tests, implements them, and reviews quality"
+            description="Analyzes code, plans tests, implements them, and reviews quality",
+            start_executor=verifier_exec,
+            max_iterations=20,
         )
-        .set_start_executor(verifier_exec)
         .add_edge(verifier_exec, verifier_routing)
         .add_switch_case_edge_group(
             verifier_routing,
@@ -143,7 +150,6 @@ def create_devui_workflow():
                 Default(target=complete),
             ]
         )
-        .set_max_iterations(20)
         .build()
     )
     
@@ -173,7 +179,12 @@ def main():
     logger.info("Creating agents...")
     verifier = create_verifier_agent()
     planner = create_planner_agent()
-    implementer = create_implementer_agent()
+    use_copilot_sdk = os.getenv("USE_COPILOT_SDK", "").lower() in ("1", "true", "yes")
+    if use_copilot_sdk:
+        logger.info("  Using Copilot SDK for implementer agent")
+        implementer = create_copilot_sdk_implementer()
+    else:
+        implementer = create_implementer_agent()
     reviewer = create_reviewer_agent()
     
     # Create workflow
@@ -197,7 +208,7 @@ def main():
     logger.info("="*60)
     
     # Launch server (opens browser automatically)
-    serve(entities=entities, port=8090, auto_open=True)
+    serve(entities=entities, port=8090, auto_open=True, instrumentation_enabled=True)
 
 
 if __name__ == "__main__":

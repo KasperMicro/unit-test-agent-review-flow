@@ -1,6 +1,6 @@
 # Microsoft Agent Framework
-agent-framework-core==1.0.0b260128
-agent-framework-devui>=1.0.0b260128
+agent-framework-core>=1.0.0rc3
+agent-framework-devui>=1.0.0b260304
 
 # Azure Identity (pinned for cryptography compatibility on ARM64)
 azure-identity>=1.15.0,<1.20
@@ -16,3 +16,6 @@ GitPython>=3.1.40
 # Environment and utilities
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
+
+# GitHub Copilot SDK (Agent Framework integration for Copilot SDK-based agents)
+agent-framework-github-copilot>=1.0.0b260304

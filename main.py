@@ -37,6 +37,13 @@ def parse_args():
         help="Labels/tags to add to the PR (e.g., 'auto-generated' 'unit-tests')"
     )
     
+    parser.add_argument(
+        "--copilot-sdk",
+        action="store_true",
+        default=False,
+        help="Use the GitHub Copilot SDK for the implementer agent instead of Agent Framework"
+    )
+    
     return parser.parse_args()
 
 
@@ -55,11 +62,13 @@ async def run_orchestration(args):
             pr_labels = [l.strip() for l in env_labels.split(",")]
     
     # Build configuration
+    use_copilot_sdk = args.copilot_sdk or os.getenv("USE_COPILOT_SDK", "").lower() in ("1", "true", "yes")
     config = OrchestrationConfig(
         workspace_path=args.workspace or os.getenv("WORKSPACE_PATH", "./workspace"),
         target_branch=target_branch,
         feature_branch_prefix="feature/add-unit-tests-",
-        pr_labels=pr_labels
+        pr_labels=pr_labels,
+        use_copilot_sdk=use_copilot_sdk,
     )
     
     # Create orchestration
@@ -72,6 +81,8 @@ async def run_orchestration(args):
     print(f"Workspace: {config.workspace_path}")
     if pr_labels:
         print(f"PR Labels: {pr_labels}")
+    if use_copilot_sdk:
+        print(f"Implementer: GitHub Copilot SDK")
     print("=" * 70)
     
     # Run the workflow

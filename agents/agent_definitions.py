@@ -2,7 +2,7 @@
 Agent Definitions for Unit Test Generation using Microsoft Agent Framework
 """
 import os
-from agent_framework import ChatAgent
+from agent_framework import Agent
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import DefaultAzureCredential
 
@@ -33,15 +33,15 @@ def create_chat_client() -> AzureOpenAIChatClient:
         )
 
 
-def create_verifier_agent() -> ChatAgent:
+def create_verifier_agent() -> Agent:
     """
     Create the Verifier Agent responsible for:
     - Checking if pytest tests exist for key code
     - Analyzing test coverage
     - Determining if tests are sufficient
     """
-    return ChatAgent(
-        chat_client=create_chat_client(),
+    return Agent(
+        create_chat_client(),
         name="VerifierAgent",
         instructions="""You are a test coverage verification specialist. Your job is to analyze the cloned repository and determine if proper pytest unit tests exist.
 
@@ -73,15 +73,15 @@ Be thorough but practical - not every line needs a test.""",
     )
 
 
-def create_planner_agent() -> ChatAgent:
+def create_planner_agent() -> Agent:
     """
     Create the Planner Agent responsible for:
     - Creating detailed test plans
     - Identifying test cases for each function
     - Planning fixtures and mocks needed
     """
-    return ChatAgent(
-        chat_client=create_chat_client(),
+    return Agent(
+        create_chat_client(),
         name="PlannerAgent",
         instructions="""You are a test planning specialist. Your job is to create comprehensive pytest test plans for the cloned repository.
 
@@ -112,15 +112,15 @@ All paths should be within the cloned repository workspace.""",
     )
 
 
-def create_implementer_agent() -> ChatAgent:
+def create_implementer_agent() -> Agent:
     """
     Create the Implementer Agent responsible for:
     - Writing pytest unit tests
     - Creating test fixtures
     - Implementing mocks and patches
     """
-    return ChatAgent(
-        chat_client=create_chat_client(),
+    return Agent(
+        create_chat_client(),
         name="ImplementerAgent",
         instructions="""You are a pytest implementation specialist. Your job is to write high-quality unit tests for the cloned repository.
 
@@ -152,15 +152,15 @@ All file paths should be within the cloned repository workspace path.""",
     )
 
 
-def create_reviewer_agent() -> ChatAgent:
+def create_reviewer_agent() -> Agent:
     """
     Create the Reviewer Agent responsible for:
     - Reviewing test quality
     - Checking edge case coverage
     - Ensuring pytest best practices
     """
-    return ChatAgent(
-        chat_client=create_chat_client(),
+    return Agent(
+        create_chat_client(),
         name="ReviewerAgent",
         instructions="""You are a code quality reviewer specializing in pytest tests. Your job is to review and improve test quality for the cloned repository.
 
